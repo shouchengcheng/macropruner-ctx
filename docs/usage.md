@@ -257,13 +257,22 @@ apply_patch(
 )
 ```
 
-Validates the diff with `git apply --check` (requires the file to be in a git repo), then applies it. Returns a success or error message.
+Validates the diff against the original file, applies it, and returns:
+- `[OK] Patch applied to <file> via git.` — git fast path (file is in a git repo)
+- `[OK] Patch applied to <file> via builtin.` — built-in pure-Python applier (no git needed)
+- `[OK] Patch applied to ... [WARN] Syntax check found N issue(s): ...` — patch applied, but the post-apply sanity check (brace balance, #if/#endif balance) flagged something
+- `[FATAL] ...` — the diff did not match the current file; the call did not succeed
 
 The LLM should generate the diff after reading the pruned file with `read_c`. Patch the **original** file, not the pruned view (the pruned view has dead code removed; the patch references original line numbers).
 
+Backend selection:
+- If the file is in a git working tree, `git apply --check` + `git apply` is tried first (the most reliable path)
+- Otherwise (or if git rejects the diff), a built-in pure-Python applier kicks in
+- The applier does NOT do fuzzy matching; if the diff's `@@ -N,M @@` line offsets don't match the current file, it fails loudly
+
 **When to use:** After the LLM proposes a change and you want to commit it.
 
-**When NOT to use:** When the file isn't in a git repo (fall back to manual editing). When the change is large enough that a full file rewrite makes more sense than a diff.
+**When NOT to use:** When the diff's offsets have drifted (regenerate from current file content first). For non-unified-diff workflows, use git apply / patch directly.
 
 ## 6. Backend selection: when each makes sense
 
@@ -394,6 +403,55 @@ Set `MACROPRUNER_CONFIG=/abs/path/to/.macroprunerrc` and check `default_target` 
 ### 10.5 read_c_with_deps skips a header I expected
 
 Stage 3 Phase 2: that header is inside an inactive `#if` block. Verify with `mode="virtual"` on the root file.
+
+## 12. The standalone CLI
+
+For users who don't want to spin up an MCP server (CI scripts, ad-hoc inspection, batch jobs in a Makefile):
+
+```bash
+# Prune a single file to stdout
+python3 cli.py read src/main.c --target PRODUCT_3
+# or via -m (if macropruner-ctx is on PYTHONPATH):
+python3 -m cli read src/main.c --target PRODUCT_3
+
+# Skeletonize
+python3 cli.py skeleton src/main.c --target PRODUCT_3
+
+# Sanity-check: run both regex and clang, compare active-line sets
+python3 cli.py diff src/main.c --target PRODUCT_3
+# OK: regex and clang agree on all 13 lines being active or inactive.
+# or:
+# Disagreement: 5 line(s) only regex-active, 0 line(s) only clang-active.
+#   regex active, clang inactive: [6, 7, 8, 9, 10]
+```
+
+CLI flags (all optional; fall back to `.macroprunerrc`):
+
+| Flag | Meaning |
+|---|---|
+| `--target NAME` | Target product/macro |
+| `--cdb PATH` | Path to `compile_commands.json` |
+| `--mode physical\|virtual` | Pruning mode |
+| `--backend regex\|clang\|auto` | Backend selection |
+
+Exit codes:
+- `0` — success (or warnings only)
+- `1` — fatal error (file not found, malformed diff, etc.)
+
+`.macroprunerrc` lookup uses the file's directory as project root, not cwd, so `python3 cli.py read /any/path/file.c` will pick up the config from the file's project, not the caller's.
+
+## 13. Error handling
+
+All four tools return error information as tagged text rather than raising exceptions. The tags are stable strings the LLM (or your test suite) can grep for:
+
+- `[FATAL]` — the call did not succeed. The user must fix something. Examples: file not found, invalid path, compile_commands.json missing, malformed diff.
+- `[ERROR]` — unexpected internal failure. Examples: parser crash, IO error mid-call.
+- `[WARN]` — call succeeded with caveats. Examples: one dep file unreadable in `read_c_with_deps`, but the rest came back. A patch applied but the post-apply syntax check flagged a structural issue.
+
+In your LLM prompt you can include a one-liner like:
+> When a tool call returns `[FATAL]`, the call did not succeed. Adjust the arguments and try again. `[WARN]` means the call worked but with caveats.
+
+The same convention is used by the CLI on stderr.
 
 ## 11. Reference
 

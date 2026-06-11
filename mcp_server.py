@@ -21,6 +21,12 @@ from skeletonizer import Skeletonizer
 from dep_graph import DependencyGraph
 from backends import get_backend, list_backends as _list_backends, PruneResult
 from config import load as load_config, resolve_compile_db
+from errors import FatalError, TransientError, format_error, with_fallback
+from patch_applier import (
+    apply_unified_diff as _apply_diff,
+    check_c_syntax as _check_c_syntax,
+    PatchError,
+)
 
 
 server = FastMCP(
@@ -173,11 +179,14 @@ def read_c(
         return summary + result.code
 
     except FileNotFoundError as e:
-        return f"/* Error: {e} */"
+        return FatalError(
+            str(e),
+            hint="verify the path exists, or drop a .macroprunerrc with 'compile_db = ...'",
+        ).formatted()
     except ValueError as e:
-        return f"/* Error: Unclosed conditional directives in source: {e} */"
+        return FatalError(str(e), hint="check argument types").formatted()
     except Exception as e:
-        return f"/* Error: {type(e).__name__}: {e} */"
+        return format_error(e)
 
 
 # ── Tool: read_c_skeleton ──────────────────────────────────────────────
@@ -225,23 +234,23 @@ def read_c_skeleton(
         stats = skel.get_stats()
 
         summary = (
-            f"/* ── MacroPruner-Ctx (Skeleton) ─────────────── */\n"
-            f"/* Target: {target}                             */\n"
-            f"/* Original: {result.original_lines} lines              */\n"
-            f"/* Skeleton: {stats['skeleton_lines']} lines             */\n"
-            f"/* Functions stripped: {stats['functions_stripped']}                  */\n"
-            f"/* Backend: {result.backend_name}                          */\n"
-            f"/* ───────────────────────────────────────────── */\n\n"
+            f"/* --- MacroPruner-Ctx (Skeleton) ----------------- */\n"
+            f"/* Target:    {result.effective_target:<36}*/\n"
+            f"/* Original:  {result.original_lines} lines                             */\n"
+            f"/* Skeleton:  {stats['skeleton_lines']} lines                            */\n"
+            f"/* Stripped:  {stats['functions_stripped']} functions                       */\n"
+            f"/* Backend:   {result.backend_name}                              */\n"
+            f"/* ------------------------------------------------ */\n\n"
         )
 
         return summary + skeleton
 
     except FileNotFoundError as e:
-        return f"/* Error: {e} */"
+        return FatalError(str(e), hint="verify the path exists").formatted()
     except ValueError as e:
-        return f"/* Error: Unclosed conditional directives in source: {e} */"
+        return FatalError(str(e), hint="check argument types").formatted()
     except Exception as e:
-        return f"/* Error: {type(e).__name__}: {e} */"
+        return format_error(e)
 
 
 # ── Tool: apply_patch ──────────────────────────────────────────────
@@ -256,7 +265,11 @@ def read_c_skeleton(
     "**Do NOT use when:** Reading or analyzing code (use read_c/read_c_skeleton/read_c_with_deps instead).\n\n"
     "**Parameters:**\n"
     "- file_path (required): Absolute or relative path to .c/.h/.cpp file to patch\n"
-    "- diff (required): Unified diff string (format: '--- a/path\\n+++ b/path\\n@@ ...')",
+    "- diff (required): Unified diff string (format: '--- a/path\\n+++ b/path\\n@@ ...')\n\n"
+    "**Backend:** Tries `git apply --check` first when the file is in a git repo (fast path). "
+    "Falls back to a built-in pure-Python applier for non-git workflows. After applying, "
+    "runs a lightweight C/C++ syntax sanity check (brace balance, #if/#endif balance) and "
+    "tags any warnings in the response.",
 )
 def apply_patch(file_path: str, diff: str) -> str:
     """Apply a unified diff patch to a C/C++ source file.
@@ -266,37 +279,110 @@ def apply_patch(file_path: str, diff: str) -> str:
         diff: Unified diff format string (output of git diff or similar)
 
     Returns:
-        Success message or error details.
+        Success message or [FATAL]/[WARN]-tagged error details.
     """
     resolved = _resolve_file_path(file_path)
     if not resolved:
-        raise FileNotFoundError(f"Cannot resolve file path: {file_path}")
+        return FatalError(
+            f"Cannot resolve file path: {file_path}",
+            hint="check the path exists and is readable",
+        ).formatted()
 
+    # Read the original content. This is what we'll patch.
     try:
-        result = subprocess.run(
+        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            original = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        return FatalError(str(e), hint="check file permissions and encoding").formatted()
+
+    # Try the git fast path first. If the file is in a git repo and
+    # `git apply` succeeds, that's the most reliable thing. Otherwise
+    # (or if git isn't installed), fall back to our built-in applier.
+    cwd = os.path.dirname(resolved)
+    new_content: Optional[str] = None
+    used_path: str = ""
+
+    if _is_in_git_repo(cwd):
+        check = subprocess.run(
             ["git", "apply", "--check"],
-            input=diff,
-            text=True,
-            capture_output=True,
-            cwd=os.path.dirname(resolved),
+            input=diff, text=True, capture_output=True, cwd=cwd,
         )
-        if result.returncode != 0:
-            return f"/* Patch validation failed:\n{result.stderr} */"
+        if check.returncode == 0:
+            apply = subprocess.run(
+                ["git", "apply"],
+                input=diff, text=True, capture_output=True, cwd=cwd,
+            )
+            if apply.returncode == 0:
+                used_path = "git"
+                new_content = None  # git wrote the file
+            else:
+                return FatalError(
+                    f"git apply failed: {apply.stderr.strip()}",
+                    hint="the diff does not match the current file state",
+                ).formatted()
+        else:
+            # git apply --check rejected the diff. Either the file
+            # has drifted from what the diff was generated against,
+            # or the diff is malformed. Try our built-in applier
+            # as a sanity check, but only if the diff is at least
+            # structurally well-formed.
+            pass  # fall through to built-in
 
-        result = subprocess.run(
-            ["git", "apply"],
-            input=diff,
-            text=True,
-            capture_output=True,
-            cwd=os.path.dirname(resolved),
+    if new_content is None and used_path == "":
+        # Built-in applier.
+        try:
+            new_content = _apply_diff(original, diff)
+            used_path = "builtin"
+        except PatchError as e:
+            return FatalError(
+                str(e),
+                hint="re-generate the diff against the current file content",
+            ).formatted()
+
+    # Write the new content (only if we used the built-in path; git
+    # already wrote the file).
+    if used_path == "builtin":
+        try:
+            with open(resolved, "w", encoding="utf-8") as f:
+                f.write(new_content)  # type: ignore[arg-type]
+        except (OSError, PermissionError) as e:
+            return FatalError(
+                str(e), hint="the file is not writable; check permissions"
+            ).formatted()
+
+    # Post-apply syntax sanity check. Warnings are returned alongside
+    # the success message; they don't fail the call.
+    final_content = new_content if new_content is not None else _read_file(resolved)
+    warnings = _check_c_syntax(final_content)
+    if warnings:
+        warn_block = "\n".join(f"  - {w}" for w in warnings)
+        return (
+            f"[OK] Patch applied to {os.path.basename(resolved)} via {used_path}.\n"
+            f"[WARN] Syntax check found {len(warnings)} issue(s):\n{warn_block}"
         )
-        if result.returncode != 0:
-            return f"/* Patch application failed:\n{result.stderr} */"
+    return f"[OK] Patch applied to {os.path.basename(resolved)} via {used_path}."
 
-        return f"/* Patch applied successfully to {os.path.basename(resolved)} */"
 
-    except Exception as e:
-        return f"/* Error: {type(e).__name__}: {e} */"
+def _is_in_git_repo(directory: str) -> bool:
+    """True if `directory` is inside a git working tree.
+
+    Cheap check: look for a .git entry anywhere up the tree.
+    """
+    cur = os.path.abspath(directory)
+    while True:
+        if os.path.isdir(os.path.join(cur, ".git")) or os.path.isfile(
+            os.path.join(cur, ".git")
+        ):
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def _read_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
 
 
 # ── Tool: read_c_with_deps ──────────────────────────────────────────────

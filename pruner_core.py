@@ -110,8 +110,17 @@ class PrunerCore:
                 return self._handle_endif(line, line_num)
 
         if self.is_currently_active():
+            # Closing any open skip range: we are inside active code now.
+            if self.current_skip_start is not None:
+                self.skipped_ranges.append(
+                    (self.current_skip_start, line_num - 1)
+                )
+                self.current_skip_start = None
             return line
         else:
+            # Starting a new skip range if not already in one.
+            if self.current_skip_start is None:
+                self.current_skip_start = line_num
             if self.mode == PrunerMode.PHYSICAL_DELETION:
                 return None
             else:

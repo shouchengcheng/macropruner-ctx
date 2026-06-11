@@ -50,7 +50,11 @@ hermes mcp add macropruner --command "/path/to/macropruner-ctx/mcp_wrapper.sh"
 | Pluggable backends: regex (fast) + clang (ground truth) | ✅ |
 | Conditional `#include` traversal (Phase 2) | ✅ |
 | 4 MCP tools: `read_c`, `read_c_skeleton`, `read_c_with_deps`, `apply_patch` | ✅ |
-| 105 tests across 9 test suites, all passing | ✅ |
+| Standalone CLI: `read` / `skeleton` / `diff` subcommands | ✅ |
+| Standalone unified-diff applier (no git required) | ✅ |
+| Post-apply C syntax sanity check | ✅ |
+| Tagged error strings (`[FATAL]` / `[ERROR]` / `[WARN]`) | ✅ |
+| 13 test suites / 178+ cases, all passing | ✅ |
 
 ## Architecture
 
@@ -156,6 +160,33 @@ Search order: `$MACROPRUNER_CONFIG` env var > `<project_root>/.macroprunerrc` > 
 - **Auto-pruning without target.** We always need to know what to keep.
 - **Writing back patches that aren't unified diffs.** Use git apply / patch for non-diff workflows.
 
+## Standalone CLI
+
+If you want to prune files without spinning up an MCP server, there's a CLI:
+
+```bash
+# Prune a file to stdout
+python3 -m macropruner read src/main.c --target PRODUCT_3
+
+# Skeletonize
+python3 -m macropruner skeleton src/main.c --target PRODUCT_3
+
+# Diff regex vs clang backends (sanity check)
+python3 -m macropruner diff src/main.c --target PRODUCT_3
+```
+
+The CLI reads `.macroprunerrc` from the file's directory (not cwd), so it behaves the same way the MCP tools do. Exit codes: 0 = success, 1 = fatal error (file not found, etc.). Warnings stay in stdout without changing the exit code.
+
+## Error handling
+
+Tool return strings are tagged with severity:
+
+- `[FATAL]` — the call did not succeed; check the message and the hint
+- `[ERROR]` — unexpected internal failure
+- `[WARN]` — call succeeded with caveats (e.g. one dep file in `read_c_with_deps` was unreadable, but the rest came back)
+
+The LLM should treat `[FATAL]` and `[ERROR]` as "this call did not succeed, retry with different args" and `[WARN]` as "this call succeeded but with caveats; you may want to mention it." The tags are stable strings you can grep for in test assertions.
+
 ## Install & test
 
 ```bash
@@ -164,12 +195,16 @@ cd macropruner-ctx
 python3 -m venv .venv && source .venv/bin/activate
 pip install mcp
 
-# Run all 9 test suites
+# Run all 13 test suites
 for t in test_pruner test_pruner_realistic test_expr_eval test_skeletonizer \
          test_dep_graph test_conditional_dep_graph test_cc_parser_cache \
-         test_config test_backends test_mcp_server; do
+         test_config test_errors test_patch_applier test_cli test_backends \
+         test_mcp_server; do
     .venv/bin/python $t.py
 done
+
+# Or use the CLI without an MCP server
+.venv/bin/python cli.py read test_samples/test_main.c --target ENABLED_FEATURE
 ```
 
 ## Documentation
