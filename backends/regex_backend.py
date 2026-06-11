@@ -75,4 +75,5 @@ class RegexBackend(PrunerBackend):
             original_lines=original_lines,
             pruned_lines=pruned_lines,
             backend_name="regex",
+            original_code=original_source,
         )

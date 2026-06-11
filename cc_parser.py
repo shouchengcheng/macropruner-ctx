@@ -1,13 +1,65 @@
 """
 Compile DB Parser - Extracts per-file active macros from compile_commands.json.
 Handles space/escape-safe command tokenization and -D flag extraction.
-"""
 
+Includes a process-level cache keyed by db path + file mtime, so the
+100th read_c call in a long agent session does not re-parse the
+compile DB. The cache is bounded and uses file mtime to invalidate,
+which means an edit to compile_commands.json in a running agent
+session will be picked up on the next call.
+"""
 import json
 import shlex
 import re
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+
+# ── Cache ──────────────────────────────────────────────────────────
+# CachedTuple = (mtime, entries)
+# Keyed by resolved db path. Capped at CACHE_MAX_ENTRIES to avoid
+# unbounded growth in long-running sessions.
+_CACHE: Dict[str, Tuple[float, List[Dict]]] = {}
+CACHE_MAX_ENTRIES = 16
+CACHE_TTL_SECONDS = 5.0  # soft TTL; mtime check is authoritative
+
+
+def _cache_get(db_path: str) -> Optional[List[Dict]]:
+    """Return cached entries if still valid, else None.
+
+    Validity = (within TTL) AND (file mtime matches cached value).
+    Either check failing -> cache miss -> caller re-parses.
+    """
+    cached = _CACHE.get(db_path)
+    if cached is None:
+        return None
+    cached_mtime, entries = cached
+    try:
+        current_mtime = Path(db_path).stat().st_mtime
+    except OSError:
+        # File disappeared: invalidate.
+        _CACHE.pop(db_path, None)
+        return None
+    if current_mtime != cached_mtime:
+        # File changed: invalidate.
+        _CACHE.pop(db_path, None)
+        return None
+    return entries
+
+
+def _cache_put(db_path: str, mtime: float, entries: List[Dict]) -> None:
+    """Store entries in cache, evicting oldest if at capacity."""
+    if len(_CACHE) >= CACHE_MAX_ENTRIES and db_path not in _CACHE:
+        # Evict the oldest by mtime.
+        oldest_key = min(_CACHE.keys(), key=lambda k: _CACHE[k][0])
+        _CACHE.pop(oldest_key, None)
+    _CACHE[db_path] = (mtime, entries)
+
+
+def clear_cache() -> None:
+    """Drop all cached entries. Exposed for tests + tooling."""
+    _CACHE.clear()
 
 
 class CompileDBParser:
@@ -20,9 +72,21 @@ class CompileDBParser:
     def _load(self) -> List[Dict]:
         if self._entries is not None:
             return self._entries
+        # Try cache first.
+        cached = _cache_get(str(self.db_path))
+        if cached is not None:
+            self._entries = cached
+            return self._entries
+        # Miss: parse and store.
         with open(self.db_path, "r") as f:
-            self._entries = json.load(f)
-        return self._entries
+            entries = json.load(f)
+        try:
+            mtime = self.db_path.stat().st_mtime
+        except OSError:
+            mtime = time.time()
+        _cache_put(str(self.db_path), mtime, entries)
+        self._entries = entries
+        return self._entries  # type: ignore[return-value]
 
     def _tokenize_command(self, entry: Dict) -> List[str]:
         command = entry.get("command", "")
@@ -130,3 +194,4 @@ def extract_macros_for_file(
     """Convenience function: extract macros for a single source file."""
     parser = CompileDBParser(compile_db_path)
     return parser.extract_macros(source_file)
+

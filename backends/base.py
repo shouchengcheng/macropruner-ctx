@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 
 @dataclass
@@ -34,6 +34,8 @@ class PruneResult:
         pruned_lines: Non-empty line count of `code`.
         backend_name: Identifier of the backend that produced this result
                       ('regex' or 'clang').
+        original_code: The full original source. Set by backends after
+                      computing token estimates. None if not tracked.
         extra: Backend-specific metadata (e.g. compiler version, macros used).
     """
     code: str
@@ -41,7 +43,13 @@ class PruneResult:
     original_lines: int = 0
     pruned_lines: int = 0
     backend_name: str = "regex"
+    original_code: Optional[str] = None
     extra: Dict[str, str] = field(default_factory=dict)
+    # What target/compile_db the backend actually used (post-fallback).
+    # MCP tools render this in the banner so the user sees the real
+    # values, not the empty defaults that were passed in.
+    effective_target: str = ""
+    effective_compile_db: str = ""
 
     @property
     def reduction_percentage(self) -> float:
@@ -53,6 +61,41 @@ class PruneResult:
             * 100,
             2,
         )
+
+    @property
+    def token_estimate(self) -> Dict[str, Union[int, float]]:
+        """LLM token estimates for the before/after pair.
+
+        Uses char_estimate (chars / 3.7) as the authoritative number
+        since it correlates best with what LLMs actually pay for. For
+        full numbers, see token_counter.estimate_pair.
+
+        Returns a dict with: original_tokens, pruned_tokens,
+        saved_tokens, saved_pct. Returns zeros if original_code
+        wasn't tracked.
+        """
+        # Local import to avoid a hard dep at module import time.
+        from token_counter import char_estimate
+
+        if self.original_code is None:
+            # Fall back to char counts derived from the code we have.
+            return {
+                "original_tokens": char_estimate(self.code) + char_estimate(
+                    "\n".join("x" for _ in range(self.original_lines - self.pruned_lines))
+                ),
+                "pruned_tokens": char_estimate(self.code),
+                "saved_tokens": 0,
+                "saved_pct": 0.0,
+            }
+        o = char_estimate(self.original_code)
+        p = char_estimate(self.code)
+        saved = max(0, o - p)
+        return {
+            "original_tokens": o,
+            "pruned_tokens": p,
+            "saved_tokens": saved,
+            "saved_pct": round(saved / o * 100, 2) if o > 0 else 0.0,
+        }
 
 
 class PrunerBackend(ABC):

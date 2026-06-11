@@ -47,7 +47,7 @@ async def test_read_c():
                 "Inactive else branch should be pruned"
             )
             assert "MacroPruner-Ctx" in content, "Summary header should be present"
-            assert "Pruned:" in content, "Stats should be present"
+            assert "Lines:" in content, "Stats should be present"
             assert not any(
                 "Error" in line
                 for line in content.splitlines()
@@ -84,7 +84,7 @@ async def test_read_c_virtual():
 
             assert "feature code" in content
             assert "IFDEF DISABLED_FEATURE" in content or "INACTIVE" in content
-            assert "Mode: virtual" in content
+            assert "Mode:      virtual" in content
 
             print(f"TEST read_c (virtual mode): PASS")
 

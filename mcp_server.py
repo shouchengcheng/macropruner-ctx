@@ -20,6 +20,7 @@ from cc_parser import CompileDBParser
 from skeletonizer import Skeletonizer
 from dep_graph import DependencyGraph
 from backends import get_backend, list_backends as _list_backends, PruneResult
+from config import load as load_config, resolve_compile_db
 
 
 server = FastMCP(
@@ -66,9 +67,25 @@ def _prune_file(
     'regex', 'clang', or 'auto'. The result is a PruneResult that
     includes code, skipped_ranges, and metadata. Falls back to regex
     if the requested backend is unavailable.
+
+    `target` and `compile_db` fall back to .macroprunerrc defaults
+    when empty. The config lookup uses CWD as project_root (which is
+    almost always the case for MCP — agents launch from the project
+    root, not arbitrary subdirs).
     """
-    resolved = _resolve_file_path(file_path)
-    if not resolved:
+    if not target or not compile_db:
+        cfg = load_config()
+        if not target:
+            target = cfg.get("pruner.default_target", "") or "DEFAULT"
+        if not compile_db:
+            # Resolve relative to cwd (MCP servers run with cwd at
+            # project root, which is the user's expectation).
+            resolved = resolve_compile_db(cfg, project_root=os.getcwd())
+            if resolved:
+                compile_db = resolved
+
+    resolved_path = _resolve_file_path(file_path)
+    if not resolved_path:
         raise FileNotFoundError(f"Cannot resolve file path: {file_path}")
     if not os.path.isfile(compile_db):
         raise FileNotFoundError(f"compile_commands.json not found: {compile_db}")
@@ -78,7 +95,10 @@ def _prune_file(
     except (ValueError, RuntimeError):
         inst = get_backend("regex")
 
-    return inst.prune(resolved, target, compile_db, mode=mode)
+    result = inst.prune(resolved_path, target, compile_db, mode=mode)
+    result.effective_target = target
+    result.effective_compile_db = compile_db
+    return result
 
 
 # ── Tool: read_c ──────────────────────────────────────────────
@@ -96,14 +116,17 @@ def _prune_file(
     "**Parameters:**\n"
     "- file_path (required): Absolute or relative path to .c/.h/.cpp file\n"
     "- target (required): Product/macro name matching #ifdef in source (e.g., 'PRODUCT_A')\n"
+    "  Falls back to `pruner.default_target` from .macroprunerrc if omitted.\n"
     "- compile_db (required): Absolute path to project's compile_commands.json\n"
+    "  Falls back to `pruner.compile_db` from .macroprunerrc, or auto-discovered\n"
+    "  in build/compile_commands.json.\n"
     "- mode (optional): 'physical' (default, removes inactive lines) or 'virtual' (keeps line numbers with markers)\n"
     "- backend (optional): 'regex' (default, fast pure-Python) | 'clang' (slower, ground truth via clang -E) | 'auto' (prefers clang if available, falls back to regex)",
 )
 def read_c(
     file_path: str,
-    target: str,
-    compile_db: str,
+    target: str = "",
+    compile_db: str = "",
     mode: str = "physical",
     backend: str = "regex",
 ) -> str:
@@ -135,14 +158,17 @@ def read_c(
         if result.backend_name == "clang":
             return result.code
 
+        tok = result.token_estimate
         summary = (
-            f"/* ── MacroPruner-Ctx ────────────────────────── */\n"
-            f"/* Target: {target}                             */\n"
-            f"/* Pruned: {result.original_lines - result.pruned_lines}/{result.original_lines} lines "
-            f"({result.reduction_percentage}%)  */\n"
-            f"/* Mode: {mode}                                */\n"
-            f"/* Backend: {result.backend_name}                          */\n"
-            f"/* ───────────────────────────────────────────── */\n\n"
+            f"/* --- MacroPruner-Ctx ---------------------------- */\n"
+            f"/* Target:    {result.effective_target:<36}*/\n"
+            f"/* Lines:     {result.original_lines - result.pruned_lines}/{result.original_lines} dropped "
+            f"({result.reduction_percentage}%)              */\n"
+            f"/* Tokens:    {tok['saved_tokens']}/{tok['original_tokens']} saved "
+            f"({tok['saved_pct']}%)                  */\n"
+            f"/* Mode:      {mode}                                */\n"
+            f"/* Backend:   {result.backend_name}                              */\n"
+            f"/* ------------------------------------------------ */\n\n"
         )
         return summary + result.code
 
@@ -168,13 +194,15 @@ def read_c(
     "**Parameters:**\n"
     "- file_path (required): Absolute or relative path to .c/.h/.cpp file\n"
     "- target (required): Product/macro name matching #ifdef in source\n"
+    "  Falls back to `pruner.default_target` from .macroprunerrc if omitted.\n"
     "- compile_db (required): Absolute path to project's compile_commands.json\n"
+    "  Falls back to .macroprunerrc / auto-discovery.\n"
     "- mode (optional): 'physical' (default) or 'virtual'",
 )
 def read_c_skeleton(
     file_path: str,
-    target: str,
-    compile_db: str,
+    target: str = "",
+    compile_db: str = "",
     mode: str = "physical",
 ) -> str:
     """Read, prune, and skeletonize a C/C++ source file.
@@ -285,14 +313,16 @@ def apply_patch(file_path: str, diff: str) -> str:
     "**Parameters:**\n"
     "- file_path (required): Absolute or relative path to primary .c/.h/.cpp file\n"
     "- target (required): Product/macro name matching #ifdef in source\n"
+    "  Falls back to .macroprunerrc.\n"
     "- compile_db (required): Absolute path to project's compile_commands.json\n"
+    "  Falls back to .macroprunerrc / auto-discovery.\n"
     "- mode (optional): 'physical' (default) or 'virtual'\n"
     "- max_depth (optional): Maximum include depth to traverse (default: 2, range: 1-5)",
 )
 def read_c_with_deps(
     file_path: str,
-    target: str,
-    compile_db: str,
+    target: str = "",
+    compile_db: str = "",
     mode: str = "physical",
     max_depth: int = 2,
 ) -> str:
@@ -309,6 +339,17 @@ def read_c_with_deps(
         Structured output with target file (full pruned) and dependencies (skeletons).
     """
     try:
+        # Apply config fallback first so compile_db is populated
+        # before we try to read include dirs.
+        if not target or not compile_db:
+            cfg = load_config()
+            if not target:
+                target = cfg.get("pruner.default_target", "") or "DEFAULT"
+            if not compile_db:
+                resolved_cdb = resolve_compile_db(cfg, project_root=os.getcwd())
+                if resolved_cdb:
+                    compile_db = resolved_cdb
+
         resolved = _resolve_file_path(file_path)
         if not resolved:
             return f"/* Error: Cannot resolve file path: {file_path} */"

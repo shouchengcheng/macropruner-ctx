@@ -1,294 +1,269 @@
 # MacroPruner-Ctx 集成指南
 
+把 MacroPruner-Ctx 接入 LLM Agent 的完整步骤。
+
 ## 概述
 
-MacroPruner-Ctx 提供 MCP 服务器，让 LLM Agent（如 Hermes、Claude Desktop 等）在读取 C/C++ 源文件时自动修剪 inactive 的条件编译代码块，从而减少 token 消耗。
+MacroPruner-Ctx 是一个 MCP（Model Context Protocol）服务器，让 LLM Agent（Hermes、Claude Desktop 等）在读 C/C++ 源文件时自动剪掉 inactive 的 `#ifdef` / `#ifndef` / `#else` / `#elif` 代码块。
 
-## 架构
+**核心能力：**
+- 完整 `#if` 表达式求值（`#if MACRO == N`、`#if defined(A) && defined(B)`、Linux 风格 `IS_ENABLED`）
+- 两级后端（regex 快 / clang 真值）
+- 三层压缩（宏剪 → 骨架化 → 依赖图）
+- 配置文件自动读取（`.macroprunerrc`）
+- Token 节省统计
 
+**4 个 MCP 工具：**
+- `read_c` — 读单文件，剪 inactive 块
+- `read_c_skeleton` — 剪 + 骨架化（剥函数体）
+- `read_c_with_deps` — 多文件上下文（含条件 include 感知）
+- `apply_patch` — 用 unified diff 写回原文件
+
+## 第一步：环境准备
+
+```bash
+git clone https://github.com/shouchengcheng/macropruner-ctx.git
+cd macropruner-ctx
+python3 -m venv .venv
+source .venv/bin/activate
+pip install mcp
 ```
-LLM Agent
-    │
-    │ MCP 协议 (stdio)
-    │
-    ▼
-┌──────────────────────────────────┐
-│         mcp_server.py            │
-│  ┌────────────────────────────┐  │
-│  │ Tool: read_c               │──│→ 修剪后 C/C++ 源码
-│  │ Tool: read_c_skeleton      │──│→ 骨架代码（仅签名+声明）
-│  │ Tool: read_c_with_deps     │──│→ 多文件上下文（目标 prune + 依赖 skeleton）
-│  │ Tool: apply_patch          │──│→ 将 unified diff 写回原文件
-│  └────────────────────────────┘  │
-└──────────────────────────────────┘
+
+> MCP SDK 要求 Python >= 3.10。如果你的系统默认 python3 版本低于 3.10，请使用虚拟环境中 Python >= 3.10 的解释器。
+
+跑测试确认环境：
+
+```bash
+.venv/bin/python test_pruner.py
+.venv/bin/python test_backends.py
+.venv/bin/python test_mcp_server.py
 ```
 
----
+## 第二步：（推荐）写项目配置
 
-## 第一步：创建 Wrapper 脚本
+在你**项目根**（不是 macropruner-ctx 目录）创建 `.macroprunerrc`：
 
-Hermes 等 Agent 的 `--command` 参数将整串视为单一可执行文件路径，无法直接传参数。需要创建 wrapper 脚本：
+```ini
+# /path/to/your-firmware/.macroprunerrc
+
+# 默认 target — MCP 调用省略时用这个
+default_target = PRODUCT_3
+
+# compile_commands.json 路径（相对项目根）
+compile_db = build/compile_commands.json
+
+# 默认后端：regex / clang / auto
+default_backend = regex
+
+# 默认模式：physical / virtual
+default_mode = physical
+
+# read_c_with_deps 的 include 遍历深度（1-5）
+default_max_depth = 3
+```
+
+之后所有 MCP 调用都可以省略 `target` 和 `compile_db` 参数。
+
+**配置查找顺序**（首个命中即用）：
+1. MCP 调用参数（最高优先级）
+2. 环境变量 `$MACROPRUNER_CONFIG`
+3. `<项目根>/.macroprunerrc`（或 `macroprunerrc`）
+4. `~/.macroprunerrc`
+5. 内置默认值
+
+## 第三步：启动 wrapper
+
+Hermes 的 `--command` 参数把整串当成单一可执行文件路径。创建 wrapper 脚本：
+
+`mcp_wrapper.sh`（项目根已有，路径指向 macropruner-ctx）：
 
 ```bash
 #!/bin/bash
-# mcp_wrapper.sh — 放在项目根目录
-exec /path/to/.venv/bin/python3 /path/to/macropruner-ctx/mcp_server.py "$@"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VENV_PYTHON="${MACROPRUNER_VENV:-$SCRIPT_DIR/.venv/bin/python3}"
+exec "$VENV_PYTHON" "$SCRIPT_DIR/mcp_server.py" "$@"
 ```
 
-赋予执行权限：
+确保可执行：
 
 ```bash
-chmod +x mcp_wrapper.sh
+chmod +x /path/to/macropruner-ctx/mcp_wrapper.sh
 ```
 
-> **说明：** MCP SDK 要求 Python >= 3.10。如果你的系统默认 python3 版本低于 3.10，请使用虚拟环境中 Python >= 3.10 的解释器。环境搭建详见 [SETUP.md](SETUP.md)。
-
----
-
-## 第二步：注册 MCP 服务器
+## 第四步：注册到 Agent
 
 ### Hermes Agent
 
 ```bash
 hermes mcp add macropruner --command "/path/to/macropruner-ctx/mcp_wrapper.sh"
-```
 
-验证：
-
-```bash
+# 验证
 hermes mcp list
 hermes mcp test macropruner
 ```
 
 ### Claude Desktop
 
-在 `claude_desktop_config.json` 中添加：
+编辑 `claude_desktop_config.json`：
 
 ```json
 {
   "mcpServers": {
     "macropruner": {
-      "command": "/path/to/.venv/bin/python3",
+      "command": "/path/to/macropruner-ctx/.venv/bin/python3",
       "args": ["/path/to/macropruner-ctx/mcp_server.py"]
     }
   }
 }
 ```
 
----
+重启 Claude Desktop。四个工具会自动出现在工具列表里。
 
-## 第三步：配置 Agent（SOUL.md）
+## 第五步：使用
 
-### Hermes：SOUL.md 配置
+### 最小调用（用 .macroprunerrc 里的默认配置）
 
-在 `~/.hermes/SOUL.md` 中添加以下内容。工具的具体参数、使用场景和约束已写入 MCP 工具的 description 字段，LLM 会通过 MCP 协议自动获取，无需在此重复。SOUL.md 只需规定全局行为约束：
-
-```markdown
-## C/C++ 代码分析工作流
-
-读取任何 C/C++ 文件时，始终使用 MacroPruner-Ctx MCP 工具，不要直接读文件。
-
-关键规则：
-1. **每次调用都必须传 `compile_db`** — 指向项目的 compile_commands.json
-2. **`target` 必须与代码中的 #ifdef 宏名一致**
-3. 根据任务选择工具（工具 description 中有详细指南）：
-   - 单文件分析 → `read_c`
-   - 快速浏览接口 → `read_c_skeleton`
-   - 跨文件依赖 → `read_c_with_deps`
-   - 写回修改 → `apply_patch`（需先生成 unified diff）
+```
+Agent: read_c(file_path="src/main.c")
 ```
 
-### Claude Desktop
+输出：
 
-Claude Desktop 无需额外配置，只需在 `claude_desktop_config.json` 中注册 MCP 服务器（见第二步）。Claude 会自动发现可用工具并根据上下文选择调用。
+```
+/* --- MacroPruner-Ctx ---------------------------- */
+/* Target:    PRODUCT_3                            */
+/* Lines:     187/420 dropped (44.5%)              */
+/* Tokens:    1230/2870 saved (42.9%)              */
+/* Mode:      physical                             */
+/* Backend:   regex                                */
+/* ------------------------------------------------ */
 
----
+void init_product3(void) { /* ... */ }
+```
 
-## read_c 参数说明
+### 显式指定参数
+
+```
+read_c(
+    file_path="src/wifi.c",
+    target="PRODUCT_5",
+    compile_db="/abs/path/to/compile_commands.json",
+    mode="physical",
+    backend="regex"
+)
+```
+
+### 读多文件上下文
+
+```
+read_c_with_deps(
+    file_path="src/wifi.c",
+    target="PRODUCT_3",
+    max_depth=3
+)
+```
+
+返回 wifi.c（完整剪后） + 它 include 的所有头文件（剪后 + 骨架化）。**Phase 2 行为**：在 inactive `#if` 块内的 include **不会被跟随**。
+
+### 写回修改
+
+LLM 看完 `read_c` 输出后，生成 unified diff：
+
+```
+read_c(file_path="src/wifi.c")  → 看代码
+generate diff                    → 准备改
+apply_patch(file_path="src/wifi.c", diff="--- a/...")
+                                 → 写回
+```
+
+## 工具参数详解
+
+### read_c
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `file_path` | string | 是 | C/C++ 源文件路径（绝对或相对路径） |
-| `target` | string | 是 | 目标产品/宏名称，如 `"PRODUCT_A"`、`"DEBUG"` |
-| `compile_db` | string | 是 | `compile_commands.json` 的路径 |
-| `mode` | string | 否 | `"physical"`（默认）彻底删除；`"virtual"` 保留行号 |
-| `backend` | string | 否 | `"regex"`（默认）/`"clang"`/`"auto"` — 见 PLAN.md 后端章节 |
+| `file_path` | string | 是 | C/C++ 源文件路径（绝对或相对） |
+| `target` | string | 否 | 目标产品/宏名（缺省用 .macroprunerrc） |
+| `compile_db` | string | 否 | compile_commands.json 路径（缺省用 .macroprunerrc / 自动发现） |
+| `mode` | string | 否 | `"physical"` 彻底删 / `"virtual"` 保留行号 |
+| `backend` | string | 否 | `"regex"`（默认） / `"clang"` / `"auto"` |
 
-### mode 对比
+**`mode` 对比：**
 
-| mode | 行为 | 适用场景 |
-|------|------|----------|
-| `physical` | 彻底删除 inactive 代码块，最省 token | 常规 LLM 分析 |
-| `virtual` | 替换为 `/* [IFDEF X - INACTIVE] */` 注释，保留行号 | 调试、需对齐行号 |
+| mode | 行为 | 场景 |
+|------|------|------|
+| `physical` | 删 inactive 块（最省 token） | 常规 LLM 阅读 |
+| `virtual` | 替换为 `/* [INACTIVE] */` 注释，保留行号 | 调试、对齐原始行号 |
 
----
+**`backend` 对比：**
 
-## read_c_skeleton：获取代码结构骨架
+| backend | 输出 | 速度 | 场景 |
+|---------|------|------|------|
+| `regex` | 原始 C 结构，宏保留 | 快 | 默认，LLM 阅读 |
+| `clang` | 完整预处理（宏展开） | 慢 | 交叉验证 oracle |
+| `auto` | 优先 clang，回退 regex | — | 一次性脚本 |
 
-当只需要了解代码结构（函数签名、struct/enum 定义、宏）而不需要具体实现时，使用 `read_c_skeleton`。它会先修剪条件编译块，再剥离所有函数体。
+### read_c_skeleton
 
-### 参数
+同 `read_c` 但额外剥函数体，只保留 struct/enum/typedef 定义和函数签名。比 read_c 再省 70-90% token。
 
-与 `read_c` 完全相同（`file_path`, `target`, `compile_db`, `mode`）。
-
-### 输出示例
-
-```c
-/* ── MacroPruner-Ctx (Skeleton) ─────────────── */
-/* Target: PRODUCT_A                             */
-/* Original: 200 lines                           */
-/* Skeleton: 35 lines                            */
-/* Functions stripped: 12                        */
-/* ───────────────────────────────────────────── */
-
-#include <stdio.h>
-#define MAX_CONN 16
-
-struct NetConfig {
-    int port;
-    char host[64];
-};
-
-int init_network(struct NetConfig *cfg);
-void shutdown_network(void);
-int send_data(const void *buf, size_t len);
-```
-
-### 适用场景
-
-- 快速了解模块接口
-- 生成 API 文档
-- 跨模块依赖分析
-- Token 极度紧张时的备选方案
-
----
-
-## read_c_with_deps：多文件依赖上下文（Stage 3 Phase 1）
-
-当 LLM 需要理解目标文件及其 `#include` 依赖的完整上下文时，使用 `read_c_with_deps`。它会解析 include 树，返回目标文件的完整修剪代码，以及依赖文件的骨架代码（仅签名），在单次调用中提供跨文件上下文。
-
-### 参数
-
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `file_path` | string | 是 | — | C/C++ 源文件路径 |
-| `target` | string | 是 | — | 目标产品/宏名称 |
-| `compile_db` | string | 是 | — | `compile_commands.json` 路径 |
-| `mode` | string | 否 | `"physical"` | `"physical"` 或 `"virtual"` |
-| `max_depth` | int | 否 | `2` | 最大 include 深度 |
-
-### 输出示例
-
-```
-/* ── MacroPruner-Ctx (with deps) ──────────────── */
-/* Target: PRODUCT_A                                */
-/* Root: app.c                                      */
-/* Dependencies: 1 files                            */
-/* Max depth: 2                                     */
-/* Mode: physical                                   */
-/* ─────────────────────────────────────────────── */
-
-/* ══ TARGET FILE: app.c ══════════════════ */
-/* Original: 20 lines | Pruned: 10 lines */
-
-#include "utils.h"
-
-void app_init(void) {
-    device_info_t dev;
-    init_device(&dev);
-}
-
-/* ══ DEPENDENCY: utils.h ══════════════════ */
-/* Skeleton: 4 lines | Functions stripped: 0 */
-
-#define UTILS_H
-#include "types.h"
-void log_message(const char *msg);
-```
-
-### 适用场景
-
-- 分析跨文件函数调用链
-- 理解 struct/enum 定义与使用的关系
-- Token 预算紧张但仍需多文件上下文
-- 调试头文件包含问题
-
----
-
-## apply_patch：将 LLM 的修改写回原文件
-
-LLM 看到修剪后的代码并给出修改建议后，通过 `apply_patch` 工具以 **unified diff** 格式写回原文件。这是最小改动的方案，不会覆盖未修改区域。
-
-### 工作流程
-
-```
-用户: 把 init_network() 改成 return -1 if port == 0
-
-LLM:
-1. read_c("src/net.c", target="A") → 看到修剪后代码
-2. 生成 unified diff:
-   --- a/src/net.c
-   +++ b/src/net.c
-   @@ -45,6 +45,7 @@
-    int init_network(int port) {
-   +    if (port == 0) return -1;
-        socket_fd = socket(AF_INET, ...);
-3. apply_patch("src/net.c", diff)
-```
-
-### apply_patch 参数说明
+### read_c_with_deps
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `file_path` | string | 是 | C/C++ 源文件路径 |
-| `diff` | string | 是 | Unified diff 格式的补丁内容 |
+| `file_path` | string | 是 | 主 C/C++ 文件 |
+| `target` | string | 否 | 缺省用 .macroprunerrc |
+| `compile_db` | string | 否 | 缺省用 .macroprunerrc |
+| `mode` | string | 否 | `"physical"` / `"virtual"` |
+| `max_depth` | int | 否 | include 遍历深度（1-5，默认 2） |
 
----
+### apply_patch
 
-## 典型会话示例
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `file_path` | string | 是 | 要 patch 的 C/C++ 文件 |
+| `diff` | string | 是 | unified diff 字符串 |
 
-```
-用户: 帮我分析 src/net/lwip_port.c 中的网络初始化逻辑
-
-Agent 调用:
-  read_c(file_path="src/net/lwip_port.c",
-         target="PRODUCT_A",
-         compile_db="/path/to/build/compile_commands.json")
-
-→ 返回修剪后代码 + 压缩率统计
-```
-
----
+要求文件在 git 仓库里（用 `git apply --check` 验证）。非 git 仓库场景请手动 patch。
 
 ## 工作原理
 
 1. Agent 启动时通过 stdio 启动 `mcp_server.py` 进程
-2. MCP 协议交换工具列表，Agent 发现 `read_c` 工具
-3. LLM 根据 system prompt 或用户请求决定调用 `read_c`
-4. `read_c` 内部流程：
-   - 解析 `compile_commands.json` 提取该文件的 `-D` 宏
-   - 结合 target 宏构建活跃宏字典
-   - 栈式状态机修剪 `#ifdef/#endif` 块
-   - 返回修剪后代码 + 压缩率统计
-5. 原始文件始终不变
-
----
+2. MCP 协议交换工具列表，Agent 发现 `read_c` / `read_c_skeleton` / `read_c_with_deps` / `apply_patch`
+3. LLM 根据上下文决定调用哪个
+4. 后端处理流程：
+   - 解析 `compile_commands.json` 提取该文件的 `-D` 宏（带 mtime 缓存）
+   - 结合 `target` + 缓存中的宏列表
+   - ExpressionEvaluator 求值 `#if` 表达式
+   - PrunerCore 栈式状态机剪 `#ifdef/#endif` 块
+   - 返回 PruneResult（code + skipped_ranges + token 节省）
+5. 原始文件不变
 
 ## 故障排查
 
-### read_c 工具未出现
+### 工具列表里没有 read_c
 
-确保 `/reset`（Hermes）或重启 Agent 会话以重新加载工具列表。
+确保已重载 MCP（Hermes 用 `/reload-mcp`，Claude Desktop 重启）。
 
-### Hermes 中报 "No such file or directory"
+### "Cannot resolve file path"
 
-`--command` 将整串视为单个可执行文件路径，不要写成 `python3 /path/to/script.py`，应使用 wrapper 脚本。详见第一步。
+`file_path` 相对当前工作目录。确保从项目根启动 Agent。
 
-### 修剪效果不符合预期
+### "compile_commands.json not found"
 
-确认 `target` 名称与项目中 `#ifdef` 使用的宏名一致。可先试 `mode="virtual"` 查看哪些块被标记为 inactive。
+- 确认 `.macroprunerrc` 里的 `compile_db` 路径正确（相对项目根）
+- 或在每次调用里显式传 `compile_db` 绝对路径
+- 或把 `compile_commands.json` 放到项目根或 `build/` 子目录
 
----
+### 剪枝效果不符合预期
+
+- 切到 `mode="virtual"` 看哪些块被标 `[INACTIVE]`
+- 检查 `target` 名和 `#ifdef` 用的宏名是否一致
+- 试 `backend="clang"` 拿 ground truth 对比
+
+### 输出 token 数显示很怪
+
+估算基于 `chars / 3.7`，对代码 ±15% 准确，老模型（GPT-3 davinci / claude-1）偏差大。
 
 ## 命令速查（Hermes）
 
@@ -296,10 +271,10 @@ Agent 调用:
 # 注册
 hermes mcp add macropruner --command "/path/to/macropruner-ctx/mcp_wrapper.sh"
 
-# 查看已注册的 MCP 服务器
+# 查看
 hermes mcp list
 
-# 测试连接
+# 测试
 hermes mcp test macropruner
 
 # 移除
@@ -308,6 +283,14 @@ hermes mcp remove macropruner
 # 切换工具启用状态
 hermes mcp configure macropruner
 
-# 只读模式下重新加载 MCP（会话中）
+# 会话中重载（只读）
 /reload-mcp
 ```
+
+## 完整使用手册
+
+[docs/usage.md](docs/usage.md) 里有更详细的操作手册，包括：
+- 完整 `#if` 语法支持表
+- 各种工作流示例（审查 / 对比产品 / 审计 / 批量）
+- 性能 / 缓存机制
+- 完整的故障排查

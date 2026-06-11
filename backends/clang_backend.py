@@ -238,6 +238,7 @@ class ClangBackend(PrunerBackend):
             original_lines=original_lines,
             pruned_lines=pruned_lines,
             backend_name="clang",
+            original_code=original_source,
             extra={
                 "clang_path": self._clang_path,
                 "active_line_count": str(len(active_orig_lines)),
