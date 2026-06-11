@@ -6,8 +6,10 @@ Exposes:
   - Resource: cfile:///path/to/file → read file (optionally pruned if target parameter provided)
 """
 
+import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -142,6 +144,56 @@ def read_c(
         return f"/* Error: {e} */"
     except ValueError as e:
         return f"/* Error: Unclosed conditional directives in source: {e} */"
+    except Exception as e:
+        return f"/* Error: {type(e).__name__}: {e} */"
+
+
+# ── Tool: apply_patch ──────────────────────────────────────────────
+
+
+@server.tool(
+    name="apply_patch",
+    description="Apply a unified diff patch to the original C/C++ source file. "
+    "The LLM should generate a diff after reading pruned code via read_c, "
+    "then call this tool to write changes back to the original file.",
+)
+def apply_patch(file_path: str, diff: str) -> str:
+    """Apply a unified diff patch to a C/C++ source file.
+
+    Args:
+        file_path: Path to the C/C++ source file (.c, .h, .cpp, etc.)
+        diff: Unified diff format string (output of git diff or similar)
+
+    Returns:
+        Success message or error details.
+    """
+    resolved = _resolve_file_path(file_path)
+    if not resolved:
+        raise FileNotFoundError(f"Cannot resolve file path: {file_path}")
+
+    try:
+        result = subprocess.run(
+            ["git", "apply", "--check"],
+            input=diff,
+            text=True,
+            capture_output=True,
+            cwd=os.path.dirname(resolved),
+        )
+        if result.returncode != 0:
+            return f"/* Patch validation failed:\n{result.stderr} */"
+
+        result = subprocess.run(
+            ["git", "apply"],
+            input=diff,
+            text=True,
+            capture_output=True,
+            cwd=os.path.dirname(resolved),
+        )
+        if result.returncode != 0:
+            return f"/* Patch application failed:\n{result.stderr} */"
+
+        return f"/* Patch applied successfully to {os.path.basename(resolved)} */"
+
     except Exception as e:
         return f"/* Error: {type(e).__name__}: {e} */"
 

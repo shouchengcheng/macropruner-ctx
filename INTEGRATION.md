@@ -120,6 +120,45 @@ compile_db 是必传参数。
 
 ---
 
+## apply_patch：将 LLM 的修改写回原文件
+
+LLM 看到修剪后的代码并给出修改建议后，通过 `apply_patch` 工具以 **unified diff** 格式写回原文件。这是最小改动的方案，不会覆盖未修改区域。
+
+### 工作流程
+
+```
+用户: 把 init_network() 改成 return -1 if port == 0
+
+LLM:
+1. read_c("src/net.c", target="A") → 看到修剪后代码
+2. 生成 unified diff:
+   --- a/src/net.c
+   +++ b/src/net.c
+   @@ -45,6 +45,7 @@
+    int init_network(int port) {
+   +    if (port == 0) return -1;
+        socket_fd = socket(AF_INET, ...);
+3. apply_patch("src/net.c", diff)
+```
+
+### apply_patch 参数说明
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `file_path` | string | 是 | C/C++ 源文件路径 |
+| `diff` | string | 是 | Unified diff 格式的补丁内容 |
+
+### SOUL.md 更新示例
+
+```
+当需要修改 C/C++ 代码时：
+1. 先用 read_c 读取修剪后代码
+2. 生成 unified diff 描述修改
+3. 调用 apply_patch(file_path, diff) 写回原文件
+```
+
+---
+
 ## 典型会话示例
 
 ```

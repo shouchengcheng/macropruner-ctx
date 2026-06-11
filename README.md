@@ -46,6 +46,9 @@ Agent 集成指南见 [INTEGRATION.md](INTEGRATION.md)。
 - `physical`：彻底删除 inactive 块（最省 token）
 - `virtual`：替换为注释标记，保留行号（适合调试）
 
+**代码修改：**
+- `apply_patch(file_path, diff)`：通过 unified diff 将 LLM 的修改写回原文件，最小化改动风险。
+
 ## 项目结构
 
 ```
