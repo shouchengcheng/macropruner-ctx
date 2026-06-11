@@ -11,7 +11,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -19,6 +19,7 @@ from pruner_core import PrunerCore, PrunerMode
 from cc_parser import CompileDBParser
 from skeletonizer import Skeletonizer
 from dep_graph import DependencyGraph
+from backends import get_backend, list_backends as _list_backends, PruneResult
 
 
 server = FastMCP(
@@ -56,30 +57,28 @@ def _prune_file(
     file_path: str,
     target: str,
     compile_db: str,
-    mode: PrunerMode = PrunerMode.PHYSICAL_DELETION,
-) -> str:
-    """Read a C/C++ file, extract macros from compile DB, prune inactive code."""
+    mode: str = "physical",
+    backend: str = "regex",
+) -> PruneResult:
+    """Prune a C/C++ file via the chosen backend.
+
+    `mode` is 'physical' or 'virtual' (string). `backend` may be
+    'regex', 'clang', or 'auto'. The result is a PruneResult that
+    includes code, skipped_ranges, and metadata. Falls back to regex
+    if the requested backend is unavailable.
+    """
     resolved = _resolve_file_path(file_path)
     if not resolved:
         raise FileNotFoundError(f"Cannot resolve file path: {file_path}")
-
     if not os.path.isfile(compile_db):
         raise FileNotFoundError(f"compile_commands.json not found: {compile_db}")
 
-    with open(resolved, "r") as f:
-        source = f.read()
-
-    active_macros = _get_active_macros_for_target(target)
-
     try:
-        parser = CompileDBParser(compile_db)
-        db_macros = parser.extract_macros(resolved)
-        active_macros.update(db_macros)
-    except json.JSONDecodeError:
-        pass
+        inst = get_backend(backend)
+    except (ValueError, RuntimeError):
+        inst = get_backend("regex")
 
-    pruner = PrunerCore(active_macros=active_macros, mode=mode)
-    return pruner.prune(source)
+    return inst.prune(resolved, target, compile_db, mode=mode)
 
 
 # ── Tool: read_c ──────────────────────────────────────────────
@@ -91,19 +90,22 @@ def _prune_file(
     "(#ifdef, #ifndef, #else, #elif, #endif) pruned away. "
     "Specify the target product/macro to keep active branches for. "
     "Returns only the active code paths with a pruning summary.\n\n"
+    "Supports #if expressions beyond simple defined() — see `backend`.\n\n"
     "**Use when:** Analyzing or modifying a single C/C++ file; need full implementation details without irrelevant #ifdef branches.\n"
     "**Do NOT use when:** You only need function signatures (use read_c_skeleton), or you need cross-file context (use read_c_with_deps).\n\n"
     "**Parameters:**\n"
     "- file_path (required): Absolute or relative path to .c/.h/.cpp file\n"
     "- target (required): Product/macro name matching #ifdef in source (e.g., 'PRODUCT_A')\n"
     "- compile_db (required): Absolute path to project's compile_commands.json\n"
-    "- mode (optional): 'physical' (default, removes inactive lines) or 'virtual' (keeps line numbers with markers)",
+    "- mode (optional): 'physical' (default, removes inactive lines) or 'virtual' (keeps line numbers with markers)\n"
+    "- backend (optional): 'regex' (default, fast pure-Python) | 'clang' (slower, ground truth via clang -E) | 'auto' (prefers clang if available, falls back to regex)",
 )
 def read_c(
     file_path: str,
     target: str,
     compile_db: str,
     mode: str = "physical",
+    backend: str = "regex",
 ) -> str:
     """Read and prune a C/C++ source file.
 
@@ -115,39 +117,34 @@ def read_c(
         mode: Pruning mode - "physical" (remove inactive lines completely)
               or "virtual" (preserve line numbers with [INACTIVE] markers).
               Default is "physical" for maximum token reduction.
+        backend: 'regex' (default, fast), 'clang' (slower ground-truth),
+                 or 'auto' (use clang if available, else regex). The
+                 clang backend returns fully preprocessed code — useful
+                 for cross-validation but not the usual LLM reading.
 
     Returns:
         Pruned source code with a summary header showing what was removed.
     """
-    pruner_mode = (
-        PrunerMode.VIRTUAL_FOLDING
-        if mode == "virtual"
-        else PrunerMode.PHYSICAL_DELETION
-    )
-
     try:
-        pruned = _prune_file(file_path, target, compile_db=compile_db, mode=pruner_mode)
-        original_file = (
-            resolved if (resolved := _resolve_file_path(file_path)) else file_path
+        result = _prune_file(
+            file_path, target, compile_db=compile_db, mode=mode, backend=backend,
         )
 
-        with open(original_file, "r") as f:
-            original_source = f.read()
-
-        original_lines = len(original_source.splitlines())
-        pruned_lines = len([l for l in pruned.splitlines() if l.strip()])
-        removed = original_lines - pruned_lines
-        pct = round(removed / original_lines * 100, 1) if original_lines > 0 else 0.0
+        # Build the summary header. The clang backend already prepends
+        # its own banner (it knows its output is fully preprocessed).
+        if result.backend_name == "clang":
+            return result.code
 
         summary = (
             f"/* ── MacroPruner-Ctx ────────────────────────── */\n"
             f"/* Target: {target}                             */\n"
-            f"/* Pruned: {removed}/{original_lines} lines ({pct}%) */\n"
-            f"/* Mode: {mode}                                     */\n"
+            f"/* Pruned: {result.original_lines - result.pruned_lines}/{result.original_lines} lines "
+            f"({result.reduction_percentage}%)  */\n"
+            f"/* Mode: {mode}                                */\n"
+            f"/* Backend: {result.backend_name}                          */\n"
             f"/* ───────────────────────────────────────────── */\n\n"
         )
-
-        return summary + pruned
+        return summary + result.code
 
     except FileNotFoundError as e:
         return f"/* Error: {e} */"
@@ -191,32 +188,21 @@ def read_c_skeleton(
     Returns:
         Skeletonized source code with function bodies replaced by { /* ... */ }
     """
-    pruner_mode = (
-        PrunerMode.VIRTUAL_FOLDING
-        if mode == "virtual"
-        else PrunerMode.PHYSICAL_DELETION
-    )
-
     try:
-        pruned = _prune_file(file_path, target, compile_db=compile_db, mode=pruner_mode)
+        result = _prune_file(file_path, target, compile_db=compile_db, mode=mode)
+        pruned = result.code
 
         skel = Skeletonizer()
         skeleton = skel.skeletonize(pruned)
         stats = skel.get_stats()
 
-        original_file = (
-            resolved if (resolved := _resolve_file_path(file_path)) else file_path
-        )
-        with open(original_file, "r") as f:
-            original_source = f.read()
-        original_lines = len(original_source.splitlines())
-
         summary = (
             f"/* ── MacroPruner-Ctx (Skeleton) ─────────────── */\n"
             f"/* Target: {target}                             */\n"
-            f"/* Original: {original_lines} lines              */\n"
+            f"/* Original: {result.original_lines} lines              */\n"
             f"/* Skeleton: {stats['skeleton_lines']} lines             */\n"
             f"/* Functions stripped: {stats['functions_stripped']}                  */\n"
+            f"/* Backend: {result.backend_name}                          */\n"
             f"/* ───────────────────────────────────────────── */\n\n"
         )
 
@@ -322,12 +308,6 @@ def read_c_with_deps(
     Returns:
         Structured output with target file (full pruned) and dependencies (skeletons).
     """
-    pruner_mode = (
-        PrunerMode.VIRTUAL_FOLDING
-        if mode == "virtual"
-        else PrunerMode.PHYSICAL_DELETION
-    )
-
     try:
         resolved = _resolve_file_path(file_path)
         if not resolved:
@@ -344,24 +324,44 @@ def read_c_with_deps(
             d if os.path.isabs(d) else os.path.join(base_dir, d) for d in include_dirs
         ]
 
+        # Stage 3 Phase 2: build the dependency graph with macro
+        # awareness. An #include nested inside an inactive #if block
+        # is NOT followed, which avoids the LLM seeing a struct defined
+        # in a header that the target product never pulls in.
+        db_macros = parser.extract_macros(resolved)
+        active_macros: Dict[str, Optional[str]] = {
+            target.upper(): None,
+            f"TARGET_{target.upper()}": None,
+            f"PRODUCT_{target.upper()}": None,
+        }
+        for k, v in db_macros.items():
+            active_macros[k] = v
+
         dg = DependencyGraph()
-        dg.build(resolved, include_dirs=abs_include_dirs, max_depth=max_depth)
+        dg.conditional_build(
+            resolved, include_dirs=abs_include_dirs,
+            max_depth=max_depth, active_macros=active_macros,
+        )
 
         root_basename = os.path.basename(resolved)
-        dep_basenames = [b for b in dg.resolved_paths if b != root_basename]
+        # We follow only paths the conditional traversal actually
+        # entered. `dg.resolved_paths` still contains the root, so
+        # the filter below excludes just the root.
+        dep_basenames = [
+            b for b in dg.resolved_paths
+            if b != root_basename and " [skipped]" not in b
+        ]
 
         sections = []
 
-        target_pruned = _prune_file(
-            resolved, target, compile_db=compile_db, mode=pruner_mode
+        target_result = _prune_file(
+            resolved, target, compile_db=compile_db, mode=mode
         )
-        with open(resolved, "r") as f:
-            original_lines = len(f.read().splitlines())
-        pruned_lines = len([l for l in target_pruned.splitlines() if l.strip()])
+        target_pruned = target_result.code
 
         sections.append(
             f"/* ══ TARGET FILE: {root_basename} ══════════════════ */\n"
-            f"/* Original: {original_lines} lines | Pruned: {pruned_lines} lines */\n\n"
+            f"/* Original: {target_result.original_lines} lines | Pruned: {target_result.pruned_lines} lines */\n\n"
             f"{target_pruned}"
         )
 
@@ -370,11 +370,11 @@ def read_c_with_deps(
             if not os.path.isfile(dep_path):
                 continue
             try:
-                dep_pruned = _prune_file(
-                    dep_path, target, compile_db=compile_db, mode=pruner_mode
+                dep_result = _prune_file(
+                    dep_path, target, compile_db=compile_db, mode=mode
                 )
                 skel = Skeletonizer()
-                dep_skeleton = skel.skeletonize(dep_pruned)
+                dep_skeleton = skel.skeletonize(dep_result.code)
                 stats = skel.get_stats()
 
                 sections.append(
@@ -396,6 +396,7 @@ def read_c_with_deps(
             f"/* Dependencies: {len(dep_basenames)} files        */\n"
             f"/* Max depth: {max_depth}                          */\n"
             f"/* Mode: {mode}                                    */\n"
+            f"/* Backend: {target_result.backend_name}                          */\n"
             f"/* ─────────────────────────────────────────────── */\n\n"
         )
 

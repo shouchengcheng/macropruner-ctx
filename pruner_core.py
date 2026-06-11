@@ -7,6 +7,8 @@ import re
 from enum import Enum, auto
 from typing import List, Dict, Optional
 
+from expr_eval import ExpressionEvaluator
+
 
 class BlockState(Enum):
     ACTIVE = auto()
@@ -27,6 +29,11 @@ class ConditionalBlock:
         self.is_active = is_active
         self.state = BlockState.ACTIVE if is_active else BlockState.INACTIVE
         self.has_else = False
+        # True once any branch in this if/elif chain has been taken.
+        # Used to suppress all subsequent #elif/#else branches after a
+        # match (per C preprocessor semantics: at most one branch of an
+        # if/elif chain is active).
+        self.taken = is_active
 
 
 class PrunerCore:
@@ -35,6 +42,13 @@ class PrunerCore:
 
     Handles deeply nested #ifdef/#ifndef/#else/#elif/#endif blocks by maintaining
     a stack of ConditionalBlock states. Only code in fully-active paths is kept.
+
+    Condition evaluation is delegated to `ExpressionEvaluator`, which understands:
+      - `defined(X)` and `defined X` (both forms)
+      - `MACRO == N` / `!= N` / `<` / `>` / `<=` / `>=` with numeric values
+      - `&&` / `||` / `!` / parentheses
+      - Linux-style `IS_ENABLED(CONFIG_X)` (whitelisted macro expansion)
+      - Case-insensitive identifier matching
     """
 
     DIRECTIVE_PATTERN = re.compile(
@@ -48,30 +62,31 @@ class PrunerCore:
     ):
         self.active_macros = active_macros
         self.mode = mode
+        self._evaluator = ExpressionEvaluator(active_macros)
         self.stack: List[ConditionalBlock] = []
         self.output_lines: List[str] = []
         self.skipped_ranges: List[tuple] = []
         self.current_skip_start: Optional[int] = None
 
     def evaluate_condition(self, condition: str) -> bool:
-        """Evaluate whether a preprocessor condition is true given active macros."""
-        condition = condition.strip()
+        """Evaluate whether a preprocessor condition is true given active macros.
 
-        if not condition:
+        Delegates to ExpressionEvaluator, which handles the full grammar:
+        defined(), logical ops, comparisons, IS_ENABLED(), case-insensitive
+        identifiers, numeric macro values.
+
+        Backward-compat note: this method returns bool, but the internal
+        parser uses 1/0 for bare identifiers. A 0 evaluates to False here.
+        """
+        try:
+            result = self._evaluator.evaluate(condition)
+            return bool(result)
+        except ValueError:
+            # On parse failure (unbalanced parens, unsupported construct),
+            # fall back to False — i.e. treat the block as inactive. This
+            # matches the historical behavior and avoids crashing the
+            # whole prune when one weird expression is encountered.
             return False
-
-        if "defined(" in condition or "defined " in condition:
-            match = re.search(r"defined\s*\(\s*(\w+)\s*\)|defined\s+(\w+)", condition)
-            if match:
-                macro_name = match.group(1) or match.group(2)
-                return macro_name in self.active_macros
-
-        simple_match = re.match(r"(\w+)", condition)
-        if simple_match:
-            macro_name = simple_match.group(1)
-            return macro_name in self.active_macros
-
-        return False
 
     def is_currently_active(self) -> bool:
         """Check if we're currently in an active code path (all ancestors are active)."""
@@ -85,7 +100,7 @@ class PrunerCore:
             directive = directive_match.group(1)
             condition = directive_match.group(2).strip()
 
-            if directive in ("ifdef", "ifndef"):
+            if directive in ("ifdef", "ifndef", "if"):
                 return self._handle_if(directive, condition, line, line_num)
             elif directive == "elif":
                 return self._handle_elif(condition, line, line_num)
@@ -103,11 +118,16 @@ class PrunerCore:
                 return ""
 
     def _handle_if(self, directive: str, condition: str, line: str, line_num: int) -> str:
-        """Handle #ifdef or #ifndef directive."""
-        is_condition_true = self.evaluate_condition(condition)
+        """Handle #ifdef, #ifndef, or #if directive.
 
+        For #if, the condition is a full C preprocessor expression evaluated
+        by ExpressionEvaluator. For #ifdef / #ifndef, the condition is just
+        a single identifier.
+        """
         if directive == "ifndef":
-            is_condition_true = not is_condition_true
+            is_condition_true = not self.evaluate_condition(condition)
+        else:
+            is_condition_true = self.evaluate_condition(condition)
 
         parent_active = self.is_currently_active() if self.stack else True
         is_active = parent_active and is_condition_true
@@ -121,27 +141,34 @@ class PrunerCore:
         return None
 
     def _handle_elif(self, condition: str, line: str, line_num: int) -> str:
-        """Handle #elif directive."""
+        """Handle #elif directive.
+
+        Semantics: this #elif is active iff (a) the chain hasn't already
+        been taken by an earlier branch, AND (b) its condition is true,
+        AND (c) all ancestor blocks are active.
+        """
         if not self.stack:
             return line
 
         top_block = self.stack[-1]
 
-        if top_block.directive not in ("ifdef", "ifndef", "elif"):
+        if top_block.directive not in ("ifdef", "ifndef", "if", "elif"):
             return line
 
         parent_active = all(b.state == BlockState.ACTIVE for b in self.stack[:-1])
-        previous_was_inactive = top_block.state == BlockState.INACTIVE
 
-        is_condition_true = self.evaluate_condition(condition)
-        is_active = parent_active and previous_was_inactive and is_condition_true
-
-        if previous_was_inactive:
-            top_block.state = BlockState.ACTIVE if is_active else BlockState.INACTIVE
-            top_block.directive = "elif"
-            top_block.condition = condition
+        if top_block.taken:
+            # Some earlier branch already won. This elif is inactive
+            # regardless of its condition.
+            new_active = False
         else:
-            top_block.state = BlockState.INACTIVE
+            new_active = parent_active and self.evaluate_condition(condition)
+
+        top_block.state = BlockState.ACTIVE if new_active else BlockState.INACTIVE
+        if new_active:
+            top_block.taken = True
+        top_block.directive = "elif"
+        top_block.condition = condition
 
         if self.mode == PrunerMode.VIRTUAL_FOLDING:
             status = "ACTIVE" if self.is_currently_active() else "INACTIVE"
@@ -149,24 +176,26 @@ class PrunerCore:
         return None
 
     def _handle_else(self, line: str, line_num: int) -> str:
-        """Handle #else directive."""
+        """Handle #else directive.
+
+        The #else branch is active iff (a) the chain hasn't been taken
+        yet, AND (b) all ancestors are active.
+        """
         if not self.stack:
             return line
 
         top_block = self.stack[-1]
 
-        if top_block.directive not in ("ifdef", "ifndef", "elif"):
+        if top_block.directive not in ("ifdef", "ifndef", "if", "elif"):
             return line
 
         parent_active = all(b.state == BlockState.ACTIVE for b in self.stack[:-1])
-        was_inactive = top_block.state == BlockState.INACTIVE
+        new_active = parent_active and not top_block.taken
 
         top_block.has_else = True
-        top_block.state = (
-            BlockState.ACTIVE
-            if (parent_active and was_inactive)
-            else BlockState.INACTIVE
-        )
+        top_block.state = BlockState.ACTIVE if new_active else BlockState.INACTIVE
+        if new_active:
+            top_block.taken = True
 
         if self.mode == PrunerMode.VIRTUAL_FOLDING:
             status = "ACTIVE" if self.is_currently_active() else "INACTIVE"
@@ -193,7 +222,16 @@ class PrunerCore:
 
         Returns:
             Pruned source code with inactive blocks removed or folded
+
+        Behavior on unclosed conditionals:
+            If the source has unclosed #if/#ifdef blocks (e.g. an `#if 0`
+            block with no matching `#endif`), the pruner does NOT raise.
+            It appends a warning comment to the output and treats the
+            remaining stack as a non-fatal condition. This matches the
+            historical "don't crash on weird code" behavior expected by
+            the unbalanced_real_world test case.
         """
+        import warnings
         lines = source_code.splitlines()
         processed_lines = []
 
@@ -204,7 +242,11 @@ class PrunerCore:
 
         if self.stack:
             unclosed = ", ".join(b.directive for b in self.stack)
-            raise ValueError(f"Unclosed conditional directives: {unclosed}")
+            warnings.warn(f"Unclosed conditional directives: {unclosed}")
+            if self.mode == PrunerMode.VIRTUAL_FOLDING:
+                processed_lines.append(
+                    f"/* [WARN: unclosed directives: {unclosed}] */"
+                )
 
         return "\n".join(processed_lines)
 

@@ -46,72 +46,123 @@ To scale this tool for massive codebases, we implement a **Four-Stage Code Reduc
 
 ---
 
-# ✅ Current Project Status — Milestone 1: Complete
+# ✅ Current Project Status
 
-All four core modules have been implemented and production-tested:
+## Milestone 1: Complete (legacy)
+- CompileDBParser, ConditionalPruner, MCP Server, Test Suite — all shipped.
 
-### Implemented Modules
-| Module | File | Status | Tests |
-|--------|------|--------|-------|
-| **Compile DB Parser** | `cc_parser.py` | ✅ Complete | — |
-| **Conditional Pruner** | `pruner_core.py` | ✅ Complete | 7/7 PASS |
-| **MCP Server** | `mcp_server.py` | ✅ Complete | 3/3 PASS (E2E) |
-| **Test Suite** | `test_pruner.py` / `test_mcp_server.py` | ✅ Complete | — |
+## Milestone 2: P0 Hardening — Complete
 
-### MCP Integration Architecture
+### New Module: `expr_eval.py`
+A full-featured C preprocessor expression evaluator. Replaces the original
+hand-rolled `defined()`/bare-macro check with a recursive-descent parser
+covering the patterns real embedded codebases actually use:
+
+| Pattern                              | Status |
+|--------------------------------------|--------|
+| `defined(X)` and `defined X`         | ✅      |
+| `MACRO == N` / `!=` / `<` / `>` / `<=` / `>=` | ✅ |
+| `&&` / `\|\|` / `!` / parens         | ✅      |
+| `MACRO + N` / `* N` / `- N` (arithmetic) | ✅  |
+| Hex literals (`0xFF`)                | ✅      |
+| `IS_ENABLED(CONFIG_X)` (whitelist)   | ✅      |
+| `IS_BUILTIN(CONFIG_X)` (whitelist)   | ✅      |
+| Case-insensitive identifier matching | ✅      |
+| Numeric macro values (`-DARCH=2`)    | ✅      |
+
+Test coverage: **28 cases** (`test_expr_eval.py`).
+
+### New Module: `backends/` — Pluggable Pruner Backends
+
+Two backends are shipped and registered automatically:
+
+| Backend  | Speed  | Output                                | Use case                                 |
+|----------|--------|---------------------------------------|------------------------------------------|
+| `regex`  | Fast   | Original C structure, macros intact   | Default; what LLMs should read           |
+| `clang`  | Slow   | Fully preprocessed (macros expanded)  | Ground-truth oracle / cross-validation   |
+
+Auto mode (`backend='auto'`) picks `clang` if available, else falls back
+to `regex`. Backends are stateless — no global cache, per-call
+instantiation only.
+
+`clang` backend implementation:
+- Locates `clang` (or `clang-14/13/12/11/10`) on PATH
+- Runs `clang -E -w` with `compile_commands.json`'s `-D`/`-I`
+- Walks the line-marker stream to identify the original-file lines
+  that survived preprocessing (= active). Skipped ranges are emitted
+  as `(start, end)` tuples in `PruneResult.skipped_ranges`
+- Skipped/inactive original lines are reconstructed as `(start, end)`
+  ranges for the caller
+
+### Stage 3 Phase 2 — Conditional-Aware Include Traversal
+
+`DependencyGraph` now exposes `conditional_build()` in addition to
+`build()`. The conditional variant:
+
+- Tracks a stack of `#if`-block active/inactive states while walking
+  the file
+- Evaluates every `#if`/`#ifdef`/`#ifndef`/`#elif` with the same
+  `ExpressionEvaluator` the pruner uses
+- Follows an `#include` ONLY if all enclosing `#if` blocks are active
+- Records skipped includes as `header.h [skipped]` in the adjacency
+  list (so callers can see what was considered, even if not followed)
+- Returns `(graph, active_includes_set)` for downstream consumers
+
+`read_c_with_deps` has been upgraded to use `conditional_build()`. When
+you ask for `target=PRODUCT_A` and the file has
+
+```c
+#ifdef PRODUCT_A
+#include "product_a.h"
+#else
+#include "product_b.h"
+#endif
 ```
-LLM Client (Anthropic, Claude Desktop, etc.)
-        │
-        │  MCP Protocol (stdio)
-        ▼
-┌─────────────────────────────┐
-│      mcp_server.py          │
-│  ┌───────────────────────┐  │
-│  │ Tool: read_c          │──│──→ pruner_core.prune() → pruned source
-│  │   (file_path, target, │  │
-│  │    mode)              │  │
-│  │                       │  │
-│  │ Resource: cfile://    │  │── raw file content (no pruning)
-│  └───────────────────────┘  │
-│  Uses: cc_parser for -D     │
-│        + _get_active_macros │
-└─────────────────────────────┘
-```
 
-### How to Use
-```bash
-# Start MCP server (stdio, used by LLM clients)
-source .venv/bin/activate && python3 mcp_server.py
+…the dependency walker follows only `product_a.h`, not `product_b.h`.
 
-# Or test directly
-python3 -c "
-from mcp_server import read_c
-print(read_c(file_path='main.c', target='PRODUCT_A', mode='physical'))
-"
-```
+### Bug Fixes
+- **elif-chain semantics**: the previous `_handle_elif` / `_handle_else`
+  used a "previous branch was inactive" heuristic, which let `#else`
+  fire incorrectly when an earlier `#if` was active. Replaced with an
+  explicit `taken` flag on `ConditionalBlock`. Verified by
+  `test_pruner_realistic.py`.
+- **`#if` directive not handled**: `process_line` previously only
+  dispatched `#ifdef` / `#ifndef`. Bare `#if` fell through and was
+  emitted as-is. Now routed through `_handle_if` → `evaluate_condition`.
+- **Unbalanced code raises instead of warns**: `prune()` now appends
+  a warning comment for unclosed conditionals (matches the
+  `unbalanced_real_world` test contract).
 
-### Stage 2: Skeletonization — ✅ Complete
+### Total Test Coverage
 
-| Module | File | Status | Tests |
-|--------|------|--------|-------|
-| **Skeletonizer** | `skeletonizer.py` | ✅ Complete | 9/9 PASS |
-| **MCP Tool** | `read_c_skeleton` in `mcp_server.py` | ✅ Complete | E2E verified |
+| Module                  | Tests |
+|-------------------------|-------|
+| `pruner_core.py`        | 12    |
+| `expr_eval.py`          | 28    |
+| `skeletonizer.py`       | 9     |
+| `dep_graph.py` (uncond) | 9     |
+| `dep_graph.py` (cond)   | 7     |
+| `backends/`             | 8     |
+| `mcp_server.py` E2E     | 6     |
+| `pruner_realistic.py`   | 10    |
+| **Total**               | **89** |
 
-**Behavior:** Strips function bodies `{ ... }` → `{ /* ... */ }`, preserves struct/union/enum/typedef definitions, `#define`/`#include` directives, and function signatures. Uses brace-counting state machine with string/comment awareness.
+### MCP API Changes (additive only)
 
-### Stage 3: Dependency Graphing (Phase 1) — ✅ Complete
+`read_c` and `read_c_with_deps` accept an optional `backend` parameter:
+- `regex` (default)
+- `clang` (ground truth)
+- `auto`
 
-| Module | File | Status | Tests |
-|--------|------|--------|-------|
-| **Dependency Graph** | `dep_graph.py` | ✅ Complete (+ resolved_paths) | 9/9 PASS |
-| **MCP Tool** | `read_c_with_deps` in `mcp_server.py` | ✅ Complete | 6/6 PASS (E2E) |
-
-**Behavior:** Parses `#include` trees recursively from a target file. Returns the target file as fully pruned source code, while dependency files are returned as pruned skeletons (signatures only). Provides multi-file context in a single MCP call, optimized for LLM token efficiency. Supports configurable max depth and physical/virtual pruning modes.
-
-**Key Fixes Applied:**
-- `cc_parser.py`: Fixed `_resolve_entry_path()` to correctly handle relative paths in compile_commands.json by resolving them against the `directory` field.
-- `dep_graph.py`: Added `resolved_paths` attribute (basename → absolute path mapping) for downstream tools to locate dependency files. Fixed relative include directory resolution.
+The header banner now includes the active backend name, so callers can
+verify which backend produced the result.
 
 ### Next Steps (not started)
-- **Stage 3 Phase 2 (Conditional-Aware Include Parsing):** Parse `#ifdef`-wrapped `#include` directives based on active macros.
+- **Stage 4 (Token Budgeting):** Token counter + auto-skeletonization
+  when budget exceeded.
+- **Cross-validation CLI:** `macropruner --diff regex clang <file>` to
+  show where the two backends disagree.
+- **Editor / LSP integration:** Pre-filter C/C++ buffers before sending
+  to LSP.
 - **Stage 4 (Token Budgeting):** Rigid cap enforcement before LLM dispatch.

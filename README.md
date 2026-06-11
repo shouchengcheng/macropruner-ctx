@@ -42,16 +42,28 @@ Agent 集成指南见 [INTEGRATION.md](INTEGRATION.md)。
 | `#else` | 切换当前层 active/inactive |
 | `#elif` 链 | 首个匹配分支激活 |
 | `#if` (简单宏名) | 宏存在 → active |
+| `#if MACRO == N` / `!=` / `<` / `>` | 数值比较 |
+| `#if defined(A) && defined(B)` | 复合条件 |
+| `#if IS_ENABLED(CONFIG_X)` | Linux 风格宏白名单 |
+
+所有标识符匹配大小写不敏感；`#if` 表达式支持完整 C 算术、十六进制字面量、`int(v, 0)` 风格的 macro 值自动检测。
 
 **两种输出模式：**
 - `physical`：彻底删除 inactive 块（最省 token）
 - `virtual`：替换为注释标记，保留行号（适合调试）
 
+**可插拔后端引擎（v0.4+）：**
+- `regex`（默认）— 纯 Python，速度快
+- `clang` — 调 `clang -E` 产预处理代码，**作为 ground-truth oracle 用来交叉验证**
+- `auto` — 优先 clang，回退 regex
+
+`read_c` / `read_c_with_deps` 都接受 `backend` 参数。详见 [PLAN.md](PLAN.md)。
+
 **代码骨架化（Stage 2）：**
 - `read_c_skeleton(file_path, target, compile_db)`：先修剪条件编译，再剥离函数体，仅保留 struct/enum/typedef 定义和函数签名。适合快速了解模块接口。
 
-**多文件依赖上下文（Stage 3 Phase 1）：**
-- `read_c_with_deps(file_path, target, compile_db, max_depth=2)`：解析 `#include` 树，返回目标文件（完整 prune）+ 依赖文件（prune + skeleton）。一次调用获取跨文件上下文，大幅减少 LLM token 消耗。
+**多文件依赖上下文（Stage 3 Phase 1+2）：**
+- `read_c_with_deps(file_path, target, compile_db, max_depth=2)`：解析 `#include` 树，返回目标文件（完整 prune）+ 依赖文件（prune + skeleton）。**Phase 2：依赖遍历现在是 conditional-aware** — 在 inactive `#if` 块内的 `#include` 不会被跟随。
 
 **代码修改：**
 - `apply_patch(file_path, diff)`：通过 unified diff 将 LLM 的修改写回原文件，最小化改动风险。
