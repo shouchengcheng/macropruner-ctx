@@ -17,6 +17,7 @@ LLM Agent
 │  ┌────────────────────────────┐  │
 │  │ Tool: read_c               │──│→ 修剪后 C/C++ 源码
 │  │ Tool: read_c_skeleton      │──│→ 骨架代码（仅签名+声明）
+│  │ Tool: read_c_with_deps     │──│→ 多文件上下文（目标 prune + 依赖 skeleton）
 │  │ Tool: apply_patch          │──│→ 将 unified diff 写回原文件
 │  └────────────────────────────┘  │
 └──────────────────────────────────┘
@@ -76,27 +77,30 @@ hermes mcp test macropruner
 
 ---
 
-## 第三步：在 Agent 中触发 read_c 调用
+## 第三步：配置 Agent（SOUL.md）
 
-### Hermes：通过 SOUL.md
+### Hermes：SOUL.md 配置
 
-在 `~/.hermes/SOUL.md` 中添加：
+在 `~/.hermes/SOUL.md` 中添加以下内容。工具的具体参数、使用场景和约束已写入 MCP 工具的 description 字段，LLM 会通过 MCP 协议自动获取，无需在此重复。SOUL.md 只需规定全局行为约束：
 
+```markdown
+## C/C++ 代码分析工作流
+
+读取任何 C/C++ 文件时，始终使用 MacroPruner-Ctx MCP 工具，不要直接读文件。
+
+关键规则：
+1. **每次调用都必须传 `compile_db`** — 指向项目的 compile_commands.json
+2. **`target` 必须与代码中的 #ifdef 宏名一致**
+3. 根据任务选择工具（工具 description 中有详细指南）：
+   - 单文件分析 → `read_c`
+   - 快速浏览接口 → `read_c_skeleton`
+   - 跨文件依赖 → `read_c_with_deps`
+   - 写回修改 → `apply_patch`（需先生成 unified diff）
 ```
-当分析 C/C++ 源文件时，始终使用 read_c 工具而非直接读取文件。
-传入 compile_db 参数指向项目的 compile_commands.json。
 
-调用方式：
-  read_c(file_path="src/main.c", target="PRODUCT_A",
-         compile_db="/path/to/compile_commands.json")
+### Claude Desktop
 
-target 参数传入当前产品/目标的宏名（如 "PRODUCT_A", "DEBUG"）。
-compile_db 是必传参数。
-```
-
-### 通用设置
-
-无论是哪个 Agent，核心原则相同：告诉 LLM 读取 C/C++ 文件时调用 `read_c` 而非普通读文件工具，并传入 `compile_db` 参数。
+Claude Desktop 无需额外配置，只需在 `claude_desktop_config.json` 中注册 MCP 服务器（见第二步）。Claude 会自动发现可用工具并根据上下文选择调用。
 
 ---
 
@@ -158,6 +162,58 @@ int send_data(const void *buf, size_t len);
 
 ---
 
+## read_c_with_deps：多文件依赖上下文（Stage 3 Phase 1）
+
+当 LLM 需要理解目标文件及其 `#include` 依赖的完整上下文时，使用 `read_c_with_deps`。它会解析 include 树，返回目标文件的完整修剪代码，以及依赖文件的骨架代码（仅签名），在单次调用中提供跨文件上下文。
+
+### 参数
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `file_path` | string | 是 | — | C/C++ 源文件路径 |
+| `target` | string | 是 | — | 目标产品/宏名称 |
+| `compile_db` | string | 是 | — | `compile_commands.json` 路径 |
+| `mode` | string | 否 | `"physical"` | `"physical"` 或 `"virtual"` |
+| `max_depth` | int | 否 | `2` | 最大 include 深度 |
+
+### 输出示例
+
+```
+/* ── MacroPruner-Ctx (with deps) ──────────────── */
+/* Target: PRODUCT_A                                */
+/* Root: app.c                                      */
+/* Dependencies: 1 files                            */
+/* Max depth: 2                                     */
+/* Mode: physical                                   */
+/* ─────────────────────────────────────────────── */
+
+/* ══ TARGET FILE: app.c ══════════════════ */
+/* Original: 20 lines | Pruned: 10 lines */
+
+#include "utils.h"
+
+void app_init(void) {
+    device_info_t dev;
+    init_device(&dev);
+}
+
+/* ══ DEPENDENCY: utils.h ══════════════════ */
+/* Skeleton: 4 lines | Functions stripped: 0 */
+
+#define UTILS_H
+#include "types.h"
+void log_message(const char *msg);
+```
+
+### 适用场景
+
+- 分析跨文件函数调用链
+- 理解 struct/enum 定义与使用的关系
+- Token 预算紧张但仍需多文件上下文
+- 调试头文件包含问题
+
+---
+
 ## apply_patch：将 LLM 的修改写回原文件
 
 LLM 看到修剪后的代码并给出修改建议后，通过 `apply_patch` 工具以 **unified diff** 格式写回原文件。这是最小改动的方案，不会覆盖未修改区域。
@@ -185,15 +241,6 @@ LLM:
 |------|------|------|------|
 | `file_path` | string | 是 | C/C++ 源文件路径 |
 | `diff` | string | 是 | Unified diff 格式的补丁内容 |
-
-### SOUL.md 更新示例
-
-```
-当需要修改 C/C++ 代码时：
-1. 先用 read_c 读取修剪后代码
-2. 生成 unified diff 描述修改
-3. 调用 apply_patch(file_path, diff) 写回原文件
-```
 
 ---
 

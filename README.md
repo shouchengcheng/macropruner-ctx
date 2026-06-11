@@ -15,6 +15,7 @@ LLM Agent (Hermes, Claude Desktop, ...)
 │  ┌────────────────────────────┐  │
 │  │ Tool: read_c               │──│→ 修剪后 C/C++ 源码
 │  │ Tool: read_c_skeleton      │──│→ 骨架代码（仅签名+声明）
+│  │ Tool: read_c_with_deps     │──│→ 多文件上下文（目标 prune + 依赖 skeleton）
 │  │ Tool: apply_patch          │──│→ 将 unified diff 写回原文件
 │  └────────────────────────────┘  │
 └──────────────────────────────────┘
@@ -49,6 +50,9 @@ Agent 集成指南见 [INTEGRATION.md](INTEGRATION.md)。
 **代码骨架化（Stage 2）：**
 - `read_c_skeleton(file_path, target, compile_db)`：先修剪条件编译，再剥离函数体，仅保留 struct/enum/typedef 定义和函数签名。适合快速了解模块接口。
 
+**多文件依赖上下文（Stage 3 Phase 1）：**
+- `read_c_with_deps(file_path, target, compile_db, max_depth=2)`：解析 `#include` 树，返回目标文件（完整 prune）+ 依赖文件（prune + skeleton）。一次调用获取跨文件上下文，大幅减少 LLM token 消耗。
+
 **代码修改：**
 - `apply_patch(file_path, diff)`：通过 unified diff 将 LLM 的修改写回原文件，最小化改动风险。
 
@@ -59,12 +63,16 @@ macropruner-ctx/
 ├── cc_parser.py          # compile_commands.json 解析器
 ├── pruner_core.py        # 核心引擎：栈式状态机
 ├── skeletonizer.py       # Stage 2：函数体剥离，保留声明
+├── dep_graph.py          # Stage 3：#include 依赖图构建器
 ├── mcp_server.py         # MCP Server (stdio)
 ├── mcp_wrapper.sh        # Wrapper 脚本
 ├── test_pruner.py        # 单元测试（7 个用例）
 ├── test_skeletonizer.py  # Skeletonizer 测试（9 个用例）
-├── test_mcp_server.py    # E2E 测试（4 个用例）
+├── test_dep_graph.py     # DepGraph 测试（9 个用例）
+├── test_mcp_server.py    # E2E 测试（6 个用例）
 ├── test_samples/         # 测试样例
+├── docs/
+│   └── stage3-evaluation.md  # Stage 3 横向评估报告
 ├── PLAN.md               # 架构文档
 ├── SETUP.md              # 环境搭建指南
 └── INTEGRATION.md        # Agent 集成指南

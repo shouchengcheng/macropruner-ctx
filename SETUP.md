@@ -56,19 +56,52 @@ TEST physical_deletion: PASS
 TEST physical_with_else: PASS
 ```
 
+运行 Skeletonizer 测试：
+
+```bash
+python3 test_skeletonizer.py
+```
+
+预期输出（9 个测试全部通过）：
+
+```
+TEST simple_function: PASS
+TEST struct_preserved: PASS
+...
+All skeletonizer tests passed!
+```
+
+运行 DepGraph 测试：
+
+```bash
+python3 test_dep_graph.py
+```
+
+预期输出（9 个测试全部通过）：
+
+```
+TEST build_graph: PASS
+TEST include_resolution: PASS
+...
+TEST resolved_paths: PASS
+All dependency graph tests passed!
+```
+
 运行 E2E 测试：
 
 ```bash
 python3 test_mcp_server.py
 ```
 
-预期输出（4 个测试全部通过）：
+预期输出（6 个测试全部通过）：
 
 ```
 TEST list_tools: PASS
 TEST read_c: PASS
 TEST read_c (virtual mode): PASS
 TEST read_c (with explicit compile_db): PASS
+TEST read_c_with_deps_listed: PASS
+TEST read_c_with_deps: PASS
 
 All MCP server tests passed!
 ```
@@ -117,11 +150,17 @@ pip install mcp
 macropruner-ctx/
 ├── cc_parser.py          # compile_commands.json 解析器
 ├── pruner_core.py        # 核心引擎：栈式状态机处理 #ifdef 嵌套
-├── mcp_server.py         # MCP Server，通过 stdio 暴露 read_c 工具
+├── skeletonizer.py       # Stage 2：函数体剥离，保留声明
+├── dep_graph.py          # Stage 3：#include 依赖图构建器
+├── mcp_server.py         # MCP Server，通过 stdio 暴露 read_c/read_c_skeleton/read_c_with_deps/apply_patch 工具
 ├── mcp_wrapper.sh        # Wrapper 脚本（Hermes 等 Agent 使用）
 ├── test_pruner.py        # 单元测试（7 个用例）
-├── test_mcp_server.py    # E2E 测试（4 个用例）
+├── test_skeletonizer.py  # Skeletonizer 测试（9 个用例）
+├── test_dep_graph.py     # DepGraph 测试（9 个用例）
+├── test_mcp_server.py    # E2E 测试（6 个用例）
 ├── test_samples/         # 测试样例 C 文件
+├── docs/
+│   └── stage3-evaluation.md  # Stage 3 横向评估报告
 ├── PLAN.md               # 架构文档
 ├── SETUP.md              # 本文档
 └── INTEGRATION.md        # Agent 集成指南

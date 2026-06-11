@@ -53,7 +53,10 @@ class CompileDBParser:
             entry_file = Path(entry.get("file", ""))
             if entry_file.suffix not in (".c", ".cpp", ".cc", ".cxx", ".C"):
                 continue
-            if entry_file.resolve() == target or entry_file.name == target.name:
+            if (
+                self._resolve_entry_path(entry) == target
+                or entry_file.name == target.name
+            ):
                 return self._parse_macros_from_command(entry)
 
         return {}
@@ -86,6 +89,16 @@ class CompileDBParser:
                     macros[macro_part] = None
         return macros
 
+    def _resolve_entry_path(self, entry: Dict) -> Path:
+        """Resolve an entry's file path relative to its directory field."""
+        entry_file = Path(entry.get("file", ""))
+        if entry_file.is_absolute():
+            return entry_file.resolve()
+        directory = entry.get("directory", "")
+        if directory:
+            return (Path(directory) / entry_file).resolve()
+        return entry_file.resolve()
+
     def resolve_include_dirs(self, source_file: str) -> List[str]:
         """Extract -I include directories for a given source file."""
         entries = self._load()
@@ -93,8 +106,7 @@ class CompileDBParser:
         include_dirs = []
 
         for entry in entries:
-            entry_file = Path(entry.get("file", ""))
-            if entry_file.resolve() != target:
+            if self._resolve_entry_path(entry) != target:
                 continue
 
             tokens = self._tokenize_command(entry)

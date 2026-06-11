@@ -18,6 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from pruner_core import PrunerCore, PrunerMode
 from cc_parser import CompileDBParser
 from skeletonizer import Skeletonizer
+from dep_graph import DependencyGraph
 
 
 server = FastMCP(
@@ -89,7 +90,14 @@ def _prune_file(
     description="Read a C/C++ source file with inactive conditional compilation blocks "
     "(#ifdef, #ifndef, #else, #elif, #endif) pruned away. "
     "Specify the target product/macro to keep active branches for. "
-    "Returns only the active code paths with a pruning summary.",
+    "Returns only the active code paths with a pruning summary.\n\n"
+    "**Use when:** Analyzing or modifying a single C/C++ file; need full implementation details without irrelevant #ifdef branches.\n"
+    "**Do NOT use when:** You only need function signatures (use read_c_skeleton), or you need cross-file context (use read_c_with_deps).\n\n"
+    "**Parameters:**\n"
+    "- file_path (required): Absolute or relative path to .c/.h/.cpp file\n"
+    "- target (required): Product/macro name matching #ifdef in source (e.g., 'PRODUCT_A')\n"
+    "- compile_db (required): Absolute path to project's compile_commands.json\n"
+    "- mode (optional): 'physical' (default, removes inactive lines) or 'virtual' (keeps line numbers with markers)",
 )
 def read_c(
     file_path: str,
@@ -157,7 +165,14 @@ def read_c(
     description="Read a C/C++ source file, prune inactive conditional blocks, "
     "then strip function bodies to produce a structural skeleton. "
     "Keeps struct/enum/typedef definitions, #define/#include directives, "
-    "and function signatures. Useful for understanding code structure without implementation details.",
+    "and function signatures. Useful for understanding code structure without implementation details.\n\n"
+    "**Use when:** Quick module interface overview; API documentation generation; cross-module dependency analysis; token budget is tight (saves 70-90% vs full code).\n"
+    "**Do NOT use when:** You need function implementation details or macro expansion logic.\n\n"
+    "**Parameters:**\n"
+    "- file_path (required): Absolute or relative path to .c/.h/.cpp file\n"
+    "- target (required): Product/macro name matching #ifdef in source\n"
+    "- compile_db (required): Absolute path to project's compile_commands.json\n"
+    "- mode (optional): 'physical' (default) or 'virtual'",
 )
 def read_c_skeleton(
     file_path: str,
@@ -222,7 +237,12 @@ def read_c_skeleton(
     name="apply_patch",
     description="Apply a unified diff patch to the original C/C++ source file. "
     "The LLM should generate a diff after reading pruned code via read_c, "
-    "then call this tool to write changes back to the original file.",
+    "then call this tool to write changes back to the original file.\n\n"
+    "**Use when:** Writing back modifications suggested by the LLM after analyzing pruned code. Ensures minimal, traceable changes.\n"
+    "**Do NOT use when:** Reading or analyzing code (use read_c/read_c_skeleton/read_c_with_deps instead).\n\n"
+    "**Parameters:**\n"
+    "- file_path (required): Absolute or relative path to .c/.h/.cpp file to patch\n"
+    "- diff (required): Unified diff string (format: '--- a/path\\n+++ b/path\\n@@ ...')",
 )
 def apply_patch(file_path: str, diff: str) -> str:
     """Apply a unified diff patch to a C/C++ source file.
@@ -261,6 +281,128 @@ def apply_patch(file_path: str, diff: str) -> str:
 
         return f"/* Patch applied successfully to {os.path.basename(resolved)} */"
 
+    except Exception as e:
+        return f"/* Error: {type(e).__name__}: {e} */"
+
+
+# ── Tool: read_c_with_deps ──────────────────────────────────────────────
+
+
+@server.tool(
+    name="read_c_with_deps",
+    description="Read a C/C++ source file with its #include dependencies. "
+    "The target file is returned as fully pruned source code. "
+    "Dependency files are returned as pruned skeletons (signatures only). "
+    "This provides multi-file context in a single call, optimized for LLM token efficiency.\n\n"
+    "**Use when:** Analyzing cross-file function calls; understanding struct/enum definitions across headers; debugging include-related issues; need multi-file context but token budget is limited (saves ~80% vs naive full paste).\n"
+    "**Do NOT use when:** Single-file analysis is sufficient (use read_c) or you only need signatures (use read_c_skeleton).\n\n"
+    "**Parameters:**\n"
+    "- file_path (required): Absolute or relative path to primary .c/.h/.cpp file\n"
+    "- target (required): Product/macro name matching #ifdef in source\n"
+    "- compile_db (required): Absolute path to project's compile_commands.json\n"
+    "- mode (optional): 'physical' (default) or 'virtual'\n"
+    "- max_depth (optional): Maximum include depth to traverse (default: 2, range: 1-5)",
+)
+def read_c_with_deps(
+    file_path: str,
+    target: str,
+    compile_db: str,
+    mode: str = "physical",
+    max_depth: int = 2,
+) -> str:
+    """Read a C/C++ file with pruned dependency context.
+
+    Args:
+        file_path: Path to the primary C/C++ source file.
+        target: Target product/macro name for conditional compilation.
+        compile_db: Path to compile_commands.json.
+        mode: Pruning mode - "physical" or "virtual". Default "physical".
+        max_depth: Maximum include depth to traverse. Default 2.
+
+    Returns:
+        Structured output with target file (full pruned) and dependencies (skeletons).
+    """
+    pruner_mode = (
+        PrunerMode.VIRTUAL_FOLDING
+        if mode == "virtual"
+        else PrunerMode.PHYSICAL_DELETION
+    )
+
+    try:
+        resolved = _resolve_file_path(file_path)
+        if not resolved:
+            return f"/* Error: Cannot resolve file path: {file_path} */"
+
+        if not os.path.isfile(compile_db):
+            return f"/* Error: compile_commands.json not found: {compile_db} */"
+
+        parser = CompileDBParser(compile_db)
+        include_dirs = parser.resolve_include_dirs(resolved)
+
+        base_dir = os.path.dirname(resolved)
+        abs_include_dirs = [
+            d if os.path.isabs(d) else os.path.join(base_dir, d) for d in include_dirs
+        ]
+
+        dg = DependencyGraph()
+        dg.build(resolved, include_dirs=abs_include_dirs, max_depth=max_depth)
+
+        root_basename = os.path.basename(resolved)
+        dep_basenames = [b for b in dg.resolved_paths if b != root_basename]
+
+        sections = []
+
+        target_pruned = _prune_file(
+            resolved, target, compile_db=compile_db, mode=pruner_mode
+        )
+        with open(resolved, "r") as f:
+            original_lines = len(f.read().splitlines())
+        pruned_lines = len([l for l in target_pruned.splitlines() if l.strip()])
+
+        sections.append(
+            f"/* ══ TARGET FILE: {root_basename} ══════════════════ */\n"
+            f"/* Original: {original_lines} lines | Pruned: {pruned_lines} lines */\n\n"
+            f"{target_pruned}"
+        )
+
+        for dep_basename in sorted(dep_basenames):
+            dep_path = dg.resolved_paths[dep_basename]
+            if not os.path.isfile(dep_path):
+                continue
+            try:
+                dep_pruned = _prune_file(
+                    dep_path, target, compile_db=compile_db, mode=pruner_mode
+                )
+                skel = Skeletonizer()
+                dep_skeleton = skel.skeletonize(dep_pruned)
+                stats = skel.get_stats()
+
+                sections.append(
+                    f"\n/* ══ DEPENDENCY: {dep_basename} ══════════════════ */\n"
+                    f"/* Skeleton: {stats['skeleton_lines']} lines | "
+                    f"Functions stripped: {stats['functions_stripped']} */\n\n"
+                    f"{dep_skeleton}"
+                )
+            except Exception:
+                sections.append(
+                    f"\n/* ══ DEPENDENCY: {dep_basename} ══════════════════ */\n"
+                    f"/* Skipped: could not process */\n"
+                )
+
+        header = (
+            f"/* ── MacroPruner-Ctx (with deps) ──────────────── */\n"
+            f"/* Target: {target}                                */\n"
+            f"/* Root: {root_basename}                           */\n"
+            f"/* Dependencies: {len(dep_basenames)} files        */\n"
+            f"/* Max depth: {max_depth}                          */\n"
+            f"/* Mode: {mode}                                    */\n"
+            f"/* ─────────────────────────────────────────────── */\n\n"
+        )
+
+        return header + "\n".join(sections)
+
+    except ValueError as e:
+        return f"/* Error: Unclosed conditional directives: {e} */"
     except Exception as e:
         return f"/* Error: {type(e).__name__}: {e} */"
 

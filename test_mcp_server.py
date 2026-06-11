@@ -129,12 +129,62 @@ async def test_read_c_with_compile_db_none():
             print(f"TEST read_c (with explicit compile_db): PASS")
 
 
+DEPS_COMPILE_DB = os.path.abspath("test_samples/deps_test/compile_commands.json")
+
+
+async def test_read_c_with_deps():
+    async with stdio_client(STDIO_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool(
+                "read_c_with_deps",
+                arguments={
+                    "file_path": "test_samples/deps_test/app.c",
+                    "target": "PRODUCT_A",
+                    "compile_db": DEPS_COMPILE_DB,
+                    "mode": "physical",
+                    "max_depth": 2,
+                },
+            )
+
+            content = (
+                result.content[0].text
+                if hasattr(result.content[0], "text")
+                else str(result.content)
+            )
+
+            assert "TARGET FILE: app.c" in content, "Target file section missing"
+            assert "DEPENDENCY:" in content, "Dependency sections missing"
+            assert "with deps" in content, "Header should indicate deps mode"
+            assert "PRODUCT_A" in content, "Target should appear in header"
+            assert "app_init" in content, "Target file code should be present"
+            assert "simple_log" not in content, (
+                "Inactive PRODUCT_B branch should be pruned from deps"
+            )
+            print("TEST read_c_with_deps: PASS")
+
+
+async def test_read_c_with_deps_listed():
+    async with stdio_client(STDIO_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.list_tools()
+            tool_names = [t.name for t in result.tools]
+
+            assert "read_c_with_deps" in tool_names, "read_c_with_deps should be listed"
+            print(f"TEST read_c_with_deps_listed: PASS")
+
+
 async def main():
     tests = [
         test_list_tools,
         test_read_c,
         test_read_c_virtual,
         test_read_c_with_compile_db_none,
+        test_read_c_with_deps_listed,
+        test_read_c_with_deps,
     ]
     for t in tests:
         try:

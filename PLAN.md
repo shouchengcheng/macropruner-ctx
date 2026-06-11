@@ -99,6 +99,19 @@ print(read_c(file_path='main.c', target='PRODUCT_A', mode='physical'))
 
 **Behavior:** Strips function bodies `{ ... }` → `{ /* ... */ }`, preserves struct/union/enum/typedef definitions, `#define`/`#include` directives, and function signatures. Uses brace-counting state machine with string/comment awareness.
 
+### Stage 3: Dependency Graphing (Phase 1) — ✅ Complete
+
+| Module | File | Status | Tests |
+|--------|------|--------|-------|
+| **Dependency Graph** | `dep_graph.py` | ✅ Complete (+ resolved_paths) | 9/9 PASS |
+| **MCP Tool** | `read_c_with_deps` in `mcp_server.py` | ✅ Complete | 6/6 PASS (E2E) |
+
+**Behavior:** Parses `#include` trees recursively from a target file. Returns the target file as fully pruned source code, while dependency files are returned as pruned skeletons (signatures only). Provides multi-file context in a single MCP call, optimized for LLM token efficiency. Supports configurable max depth and physical/virtual pruning modes.
+
+**Key Fixes Applied:**
+- `cc_parser.py`: Fixed `_resolve_entry_path()` to correctly handle relative paths in compile_commands.json by resolving them against the `directory` field.
+- `dep_graph.py`: Added `resolved_paths` attribute (basename → absolute path mapping) for downstream tools to locate dependency files. Fixed relative include directory resolution.
+
 ### Next Steps (not started)
-- **Stage 3 (Dependency Graphing):** Parse `#include` trees for multi-file context optimization.
+- **Stage 3 Phase 2 (Conditional-Aware Include Parsing):** Parse `#ifdef`-wrapped `#include` directives based on active macros.
 - **Stage 4 (Token Budgeting):** Rigid cap enforcement before LLM dispatch.
