@@ -90,7 +90,15 @@ print(read_c(file_path='main.c', target='PRODUCT_A', mode='physical'))
 "
 ```
 
+### Stage 2: Skeletonization — ✅ Complete
+
+| Module | File | Status | Tests |
+|--------|------|--------|-------|
+| **Skeletonizer** | `skeletonizer.py` | ✅ Complete | 9/9 PASS |
+| **MCP Tool** | `read_c_skeleton` in `mcp_server.py` | ✅ Complete | E2E verified |
+
+**Behavior:** Strips function bodies `{ ... }` → `{ /* ... */ }`, preserves struct/union/enum/typedef definitions, `#define`/`#include` directives, and function signatures. Uses brace-counting state machine with string/comment awareness.
+
 ### Next Steps (not started)
-- **Stage 2 (Skeletonization):** Strip function bodies `{ ... }`, keep structs/defines/signatures.
 - **Stage 3 (Dependency Graphing):** Parse `#include` trees for multi-file context optimization.
 - **Stage 4 (Token Budgeting):** Rigid cap enforcement before LLM dispatch.

@@ -12,16 +12,14 @@ LLM Agent
     │ MCP 协议 (stdio)
     │
     ▼
-┌─────────────────────────────┐
-│      mcp_server.py          │
-│  ┌───────────────────────┐  │
-│  │ Tool: read_c          │──│──→ 返回修剪后 C/C++ 源码
-│  │   (file_path,         │  │
-│  │    target,            │  │
-│  │    compile_db,        │  │
-│  │    mode)              │  │
-│  └───────────────────────┘  │
-└─────────────────────────────┘
+┌──────────────────────────────────┐
+│         mcp_server.py            │
+│  ┌────────────────────────────┐  │
+│  │ Tool: read_c               │──│→ 修剪后 C/C++ 源码
+│  │ Tool: read_c_skeleton      │──│→ 骨架代码（仅签名+声明）
+│  │ Tool: apply_patch          │──│→ 将 unified diff 写回原文件
+│  └────────────────────────────┘  │
+└──────────────────────────────────┘
 ```
 
 ---
@@ -117,6 +115,46 @@ compile_db 是必传参数。
 |------|------|----------|
 | `physical` | 彻底删除 inactive 代码块，最省 token | 常规 LLM 分析 |
 | `virtual` | 替换为 `/* [IFDEF X - INACTIVE] */` 注释，保留行号 | 调试、需对齐行号 |
+
+---
+
+## read_c_skeleton：获取代码结构骨架
+
+当只需要了解代码结构（函数签名、struct/enum 定义、宏）而不需要具体实现时，使用 `read_c_skeleton`。它会先修剪条件编译块，再剥离所有函数体。
+
+### 参数
+
+与 `read_c` 完全相同（`file_path`, `target`, `compile_db`, `mode`）。
+
+### 输出示例
+
+```c
+/* ── MacroPruner-Ctx (Skeleton) ─────────────── */
+/* Target: PRODUCT_A                             */
+/* Original: 200 lines                           */
+/* Skeleton: 35 lines                            */
+/* Functions stripped: 12                        */
+/* ───────────────────────────────────────────── */
+
+#include <stdio.h>
+#define MAX_CONN 16
+
+struct NetConfig {
+    int port;
+    char host[64];
+};
+
+int init_network(struct NetConfig *cfg);
+void shutdown_network(void);
+int send_data(const void *buf, size_t len);
+```
+
+### 适用场景
+
+- 快速了解模块接口
+- 生成 API 文档
+- 跨模块依赖分析
+- Token 极度紧张时的备选方案
 
 ---
 

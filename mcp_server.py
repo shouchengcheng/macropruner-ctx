@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 
 from pruner_core import PrunerCore, PrunerMode
 from cc_parser import CompileDBParser
+from skeletonizer import Skeletonizer
 
 
 server = FastMCP(
@@ -139,6 +140,72 @@ def read_c(
         )
 
         return summary + pruned
+
+    except FileNotFoundError as e:
+        return f"/* Error: {e} */"
+    except ValueError as e:
+        return f"/* Error: Unclosed conditional directives in source: {e} */"
+    except Exception as e:
+        return f"/* Error: {type(e).__name__}: {e} */"
+
+
+# ── Tool: read_c_skeleton ──────────────────────────────────────────────
+
+
+@server.tool(
+    name="read_c_skeleton",
+    description="Read a C/C++ source file, prune inactive conditional blocks, "
+    "then strip function bodies to produce a structural skeleton. "
+    "Keeps struct/enum/typedef definitions, #define/#include directives, "
+    "and function signatures. Useful for understanding code structure without implementation details.",
+)
+def read_c_skeleton(
+    file_path: str,
+    target: str,
+    compile_db: str,
+    mode: str = "physical",
+) -> str:
+    """Read, prune, and skeletonize a C/C++ source file.
+
+    Args:
+        file_path: Path to the C/C++ source file (.c, .h, .cpp, etc.)
+        target: Target product/macro name (e.g., "PRODUCT_A", "DEBUG").
+        compile_db: Path to compile_commands.json for the project.
+        mode: Pruning mode - "physical" or "virtual". Default is "physical".
+
+    Returns:
+        Skeletonized source code with function bodies replaced by { /* ... */ }
+    """
+    pruner_mode = (
+        PrunerMode.VIRTUAL_FOLDING
+        if mode == "virtual"
+        else PrunerMode.PHYSICAL_DELETION
+    )
+
+    try:
+        pruned = _prune_file(file_path, target, compile_db=compile_db, mode=pruner_mode)
+
+        skel = Skeletonizer()
+        skeleton = skel.skeletonize(pruned)
+        stats = skel.get_stats()
+
+        original_file = (
+            resolved if (resolved := _resolve_file_path(file_path)) else file_path
+        )
+        with open(original_file, "r") as f:
+            original_source = f.read()
+        original_lines = len(original_source.splitlines())
+
+        summary = (
+            f"/* ── MacroPruner-Ctx (Skeleton) ─────────────── */\n"
+            f"/* Target: {target}                             */\n"
+            f"/* Original: {original_lines} lines              */\n"
+            f"/* Skeleton: {stats['skeleton_lines']} lines             */\n"
+            f"/* Functions stripped: {stats['functions_stripped']}                  */\n"
+            f"/* ───────────────────────────────────────────── */\n\n"
+        )
+
+        return summary + skeleton
 
     except FileNotFoundError as e:
         return f"/* Error: {e} */"
