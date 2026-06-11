@@ -86,13 +86,13 @@ class PrunerCore:
             condition = directive_match.group(2).strip()
 
             if directive in ("ifdef", "ifndef"):
-                return self._handle_if(directive, condition, line_num)
+                return self._handle_if(directive, condition, line, line_num)
             elif directive == "elif":
-                return self._handle_elif(condition, line_num)
+                return self._handle_elif(condition, line, line_num)
             elif directive == "else":
-                return self._handle_else(line_num)
+                return self._handle_else(line, line_num)
             elif directive == "endif":
-                return self._handle_endif(line_num)
+                return self._handle_endif(line, line_num)
 
         if self.is_currently_active():
             return line
@@ -102,7 +102,7 @@ class PrunerCore:
             else:
                 return ""
 
-    def _handle_if(self, directive: str, condition: str, line_num: int) -> str:
+    def _handle_if(self, directive: str, condition: str, line: str, line_num: int) -> str:
         """Handle #ifdef or #ifndef directive."""
         is_condition_true = self.evaluate_condition(condition)
 
@@ -120,7 +120,7 @@ class PrunerCore:
             return comment_marker
         return None
 
-    def _handle_elif(self, condition: str, line_num: int) -> str:
+    def _handle_elif(self, condition: str, line: str, line_num: int) -> str:
         """Handle #elif directive."""
         if not self.stack:
             return line
@@ -148,7 +148,7 @@ class PrunerCore:
             return f"/* [ELIF {condition} - {status}] */"
         return None
 
-    def _handle_else(self, line_num: int) -> str:
+    def _handle_else(self, line: str, line_num: int) -> str:
         """Handle #else directive."""
         if not self.stack:
             return line
@@ -173,7 +173,7 @@ class PrunerCore:
             return f"/* [ELSE - {status}] */"
         return None
 
-    def _handle_endif(self, line_num: int) -> str:
+    def _handle_endif(self, line: str, line_num: int) -> str:
         """Handle #endif directive."""
         if not self.stack:
             return line

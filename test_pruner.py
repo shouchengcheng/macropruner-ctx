@@ -125,6 +125,62 @@ guard_not_set = true;
     print(f"test_ifndef: PASS - {stats}")
 
 
+# ── Regression tests for NameError: name 'line' is not defined ──
+# Added 2026-06-11 after the 4 _handle_* methods were found to reference
+# an undefined `line` in their fallback branches. These tests must not be
+# removed — they prevent the bug from silently regressing.
+
+
+def test_orphan_elif():
+    """Orphan #elif (stack empty) must not raise NameError."""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    r = p.process_line("#elif FOO", 1)
+    # Plan A: return original line; Plan B: return None — both are valid
+    assert r is None or r == "#elif FOO"
+    print("test_orphan_elif: PASS")
+
+
+def test_orphan_else():
+    """Orphan #else (stack empty) must not raise NameError."""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    r = p.process_line("#else", 1)
+    assert r is None or r == "#else"
+    print("test_orphan_else: PASS")
+
+
+def test_orphan_endif():
+    """Orphan #endif (stack empty) must not raise NameError."""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    r = p.process_line("#endif", 1)
+    assert r is None or r == "#endif"
+    print("test_orphan_endif: PASS")
+
+
+def test_double_endif():
+    """Second consecutive #endif (stack already empty) must not raise NameError."""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    p.process_line("#ifdef FOO", 1)
+    p.process_line("#endif", 2)
+    r = p.process_line("#endif", 3)  # stack already empty
+    assert r is None or r == "#endif"
+    print("test_double_endif: PASS")
+
+
+def test_unbalanced_real_world():
+    """Real-world: #if 0 block + unbalanced #endif + orphan #else must not raise."""
+    src = """line1
+#if 0
+removed
+#else
+kept
+"""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    out = p.prune(src)   # would raise NameError before the fix
+    assert "line1" in out
+    assert "kept" in out
+    print(f"test_unbalanced_real_world: PASS - {out!r}")
+
+
 if __name__ == "__main__":
     test_simple_ifdef_active()
     test_simple_ifdef_inactive()
@@ -133,4 +189,9 @@ if __name__ == "__main__":
     test_physical_deletion()
     test_elif_chain()
     test_ifndef()
+    test_orphan_elif()
+    test_orphan_else()
+    test_orphan_endif()
+    test_double_endif()
+    test_unbalanced_real_world()
     print("\nAll tests passed!")

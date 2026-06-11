@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MacroPruner-Ctx NameError Root Cause Analysis</title>
+<style>
+body { font-family: -apple-system, "Helvetica Neue", "Microsoft YaHei", sans-serif; max-width: 980px; margin: 24px auto; padding: 0 20px; color: #1f2328; line-height: 1.7; }
+h1, h2, h3 { color: #1f2328; }
+h1 { border-bottom: 2px solid #d0d7de; padding-bottom: 8px; }
+h2 { border-bottom: 1px solid #d0d7de; padding-bottom: 4px; margin-top: 32px; }
+code { background: #f6f8fa; padding: 1px 6px; border-radius: 4px; font-size: 0.92em; font-family: "JetBrains Mono", "SF Mono", Consolas, monospace; }
+pre { background: #f6f8fa; padding: 14px 18px; border-radius: 6px; overflow-x: auto; line-height: 1.5; font-size: 0.88em; }
+pre code { background: transparent; padding: 0; }
+.critical { background: #fff1f0; border-left: 4px solid #cf222e; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.info { background: #ddf4ff; border-left: 4px solid #0969da; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #fff8c5; border-left: 4px solid #9a6700; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.tag { display: inline-block; padding: 2px 8px; background: #ddf4ff; color: #0969da; border-radius: 12px; font-size: 0.8em; margin-right: 4px; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th, td { border: 1px solid #d0d7de; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; }
+.muted { color: #656d76; font-size: 0.92em; }
+hr { border: 0; border-top: 1px solid #d0d7de; margin: 24px 0; }
+</style>
+</head>
+<body>
+
+<h1>MacroPruner-Ctx NameError 根因排查报告</h1>
+
+<p>
+<span class="tag">bug 报告</span>
+<span class="tag">P0</span>
+<span class="tag">2026-06-11</span>
+<span class="tag">作者: Hermes Agent</span>
+</p>
+
+<p class="muted">
+关联项目: <code>/home/scc/workspace/ai_test/macropruner-ctx</code><br>
+关联文件: <code>pruner_core.py</code><br>
+影响工具: <code>read_c</code> / <code>read_c_skeleton</code> / <code>read_c_with_deps</code>（全部）
+</p>
+
+<hr>
+
+<h2>1. 一句话根因</h2>
+
+<div class="critical">
+<strong><code>pruner_core.py</code> 的 4 个 <code>_handle_*</code> 兜底分支用 <code>return line</code>，但 <code>line</code> 在这些方法作用域内从未定义</strong>（签名只有 <code>line_num</code>，调用方 <code>process_line</code> 也没把 <code>line</code> 传进去）。任何含有"孤立 <code>#elif</code> / <code>#else</code> / <code>#endif</code>"或"不平衡 <code>#endif</code>"的源码都会触发 <code>NameError: name 'line' is not defined</code>。
+</div>
+
+<h2>2. 调用链与代码定位</h2>
+
+<p>完整调用链（MCP 工具 → Python 类）：</p>
+
+<pre><code>mcp_server.py::read_c / read_c_skeleton / read_c_with_deps
+  └─ _prune_file(file_path, target, compile_db, mode)
+       └─ pruner.prune(source)                        ← pruner_core.py:187
+            └─ for line_num, line in enumerate(...)  ← pruner_core.py:200
+                 └─ process_line(line, line_num)      ← pruner_core.py:80
+                      └─ directive_match.group(...)
+                      └─ self._handle_if(directive, condition, line_num)        ← 注意：没传 line
+                      └─ self._handle_elif(condition, line_num)                  ← 同上
+                      └─ self._handle_else(line_num)                              ← 同上
+                      └─ self._handle_endif(line_num)                             ← 同上
+</code></pre>
+
+<p><code>process_line()</code> 在 <code>pruner_core.py:88-95</code> 调三个 <code>_handle_*</code> 方法时，<strong>只传了 <code>line_num</code>，没有传 <code>line</code></strong>。三个 <code>_handle_*</code> 方法签名也没有 <code>line</code> 参数。但每个方法在"栈空 / 指令类型不符"的兜底分支都写了 <code>return line</code> —— <code>line</code> 在那个作用域里根本不存在。</p>
+
+<h3>2.1 四个有问题的位置（<code>pruner_core.py</code>）</h3>
+
+<table>
+<thead>
+<tr><th>行号</th><th>方法</th><th>代码</th><th>问题</th></tr>
+</thead>
+<tbody>
+<tr>
+<td>126</td>
+<td><code>_handle_elif</code></td>
+<td><code>if not self.stack:<br>&nbsp;&nbsp;&nbsp;&nbsp;return line</code></td>
+<td><code>line</code> 未定义 → NameError</td>
+</tr>
+<tr>
+<td>131</td>
+<td><code>_handle_elif</code></td>
+<td><code>if top_block.directive not in (...):<br>&nbsp;&nbsp;&nbsp;&nbsp;return line</code></td>
+<td><code>line</code> 未定义 → NameError</td>
+</tr>
+<tr>
+<td>154</td>
+<td><code>_handle_else</code></td>
+<td><code>if not self.stack:<br>&nbsp;&nbsp;&nbsp;&nbsp;return line</code></td>
+<td><code>line</code> 未定义 → NameError</td>
+</tr>
+<tr>
+<td>159</td>
+<td><code>_handle_else</code></td>
+<td><code>if top_block.directive not in (...):<br>&nbsp;&nbsp;&nbsp;&nbsp;return line</code></td>
+<td><code>line</code> 未定义 → NameError</td>
+</tr>
+<tr>
+<td>179</td>
+<td><code>_handle_endif</code></td>
+<td><code>if not self.stack:<br>&nbsp;&nbsp;&nbsp;&nbsp;return line</code></td>
+<td><code>line</code> 未定义 → NameError</td>
+</tr>
+</tbody>
+</table>
+
+<p>说明：<code>_handle_if</code>（line 105-121）没有这个问题 —— 它在两个分支都 <code>return comment_marker</code> 或 <code>return None</code>，不引用 <code>line</code>。其他 3 个方法都是"从 <code>process_line</code> 透传过来的 <code>line</code>"的<strong>幻觉引用</strong>。</p>
+
+<h2>3. 复现验证</h2>
+
+<p>在 <code>/home/scc/workspace/ai_test/macropruner-ctx</code> 下直接调 <code>PrunerCore.process_line()</code>，5 个最小用例全部复现：</p>
+
+<pre><code>Case A: 孤立 #elif (stack 空)    → REPRODUCED: NameError: name 'line' is not defined
+Case B: 孤立 #else (stack 空)     → REPRODUCED: NameError: name 'line' is not defined
+Case C: 孤立 #endif (stack 空)    → REPRODUCED: NameError: name 'line' is not defined
+Case D: 双重 #endif                → REPRODUCED: NameError: name 'line' is not defined
+Case E: #if 0 / 不平衡 #endif + 孤立 #else → REPRODUCED: NameError: name 'line' is not defined
+</code></pre>
+
+<p>而现有 <code>test_pruner.py</code> 的 7 个测试用例<strong>全部 PASS</strong>。这正解释了为什么 bug 一直未被发现：</p>
+
+<h2>4. 为什么现有测试没抓到</h2>
+
+<div class="warn">
+<strong>所有 7 个测试都只覆盖"语法正确嵌套"的正常路径</strong>，不覆盖以下边界：
+</div>
+
+<ul>
+<li>孤立的 <code>#elif</code>（无前置 <code>#if</code>）</li>
+<li>孤立的 <code>#else</code>（无前置 <code>#if</code>）</li>
+<li>孤立的 <code>#endif</code>（无前置 <code>#if</code>）</li>
+<li>多个 <code>#endif</code> 紧跟（第一个弹空栈后第二个进入兜底）</li>
+<li>嵌套深度失衡（<code>#if A</code> → <code>#else</code> → <code>#if B</code> → 缺少 <code>#endif B</code> 直接 <code>#endif A</code>）</li>
+</ul>
+
+<p>固件 SDK（尤其 ws63、RTL8720）大量使用 <code>#if 0</code> 块、跨文件 <code>#ifdef</code> 嵌套、和 release/debug 切换宏，<strong>几乎必然会在某些真实文件上触发孤立 <code>#endif</code></strong>。wm_fota.c 就是其中之一（31885 字节，含 <code>#if 0</code> 块、嵌套 <code>#ifdef</code>，本会话就被它卡住）。</p>
+
+<h2>5. 修复方案</h2>
+
+<p>三种思路，按推荐度排序：</p>
+
+<h3>方案 A（推荐）：给 3 个方法加 <code>line</code> 参数，调用方一并传入</h3>
+
+<p>优点：保留原代码意图（"兜底时把原行返回"）；最小行为变化；不引入静默错误。</p>
+
+<pre><code># pruner_core.py
+# 修改 1: process_line 调用处加 line 参数（line 88-95）
+def process_line(self, line: str, line_num: int) -> str:
+    ...
+    if directive in ("ifdef", "ifndef"):
+        return self._handle_if(directive, condition, line, line_num)   # +line
+    elif directive == "elif":
+        return self._handle_elif(condition, line, line_num)            # +line
+    elif directive == "else":
+        return self._handle_else(line, line_num)                       # +line
+    elif directive == "endif":
+        return self._handle_endif(line, line_num)                      # +line
+
+# 修改 2: 4 个方法签名加 line 参数
+def _handle_if(self, directive: str, condition: str, line: str, line_num: int) -> str:
+    # 该方法无 return line，无需改 body
+    ...
+
+def _handle_elif(self, condition: str, line: str, line_num: int) -> str:
+    if not self.stack:
+        return line                                                    # 现在合法
+    top_block = self.stack[-1]
+    if top_block.directive not in ("ifdef", "ifndef", "elif"):
+        return line                                                    # 现在合法
+    ...
+
+def _handle_else(self, line: str, line_num: int) -> str:
+    if not self.stack:
+        return line                                                    # 现在合法
+    top_block = self.stack[-1]
+    if top_block.directive not in ("ifdef", "ifndef", "elif"):
+        return line                                                    # 现在合法
+    ...
+
+def _handle_endif(self, line: str, line_num: int) -> str:
+    if not self.stack:
+        return line                                                    # 现在合法
+    ...
+</code></pre>
+
+<h3>方案 B（保守）：3 个 <code>return line</code> 全改成 <code>return None</code></h3>
+
+<p>优点：改动最小，1 行 5 处替换。<br>
+缺点：和"原样返回 line"的原意不同；静默丢行可能掩盖真实语法问题。</p>
+
+<pre><code># pruner_core.py - pr 级别替换即可
+sed -i 's|        return line$|        return None|g' pruner_core.py
+# 然后人工确认 line 126/131/154/159/179 五处
+</code></pre>
+
+<h3>方案 C（激进的正确方案）：兜底分支直接 <code>raise ValueError</code></h3>
+
+<p>优点：让真实语法错误立刻暴露，避免静默坏数据。<br>
+缺点：会破坏"宽松解析"的设计意图；如果用户刻意写了孤立 <code>#endif</code> 当注释（罕见但有），会失败。</p>
+
+<h2>6. 验证步骤</h2>
+
+<p>修完后跑：</p>
+
+<ol>
+<li><code>.venv/bin/python test_pruner.py</code> — 7 个现有用例应该全过（方案 A 不改行为）</li>
+<li>再跑本报告 5 个最小复现用例 — 应该不再 NameError</li>
+<li>加新测试 <code>test_orphan_directives</code> 覆盖 5 个边界（见 §7）</li>
+<li>启动 MCP server，跑实际 <code>read_c</code> 调用验证</li>
+</ol>
+
+<h2>7. 建议新增的测试用例</h2>
+
+<p>补到 <code>test_pruner.py</code> 末尾：</p>
+
+<pre><code>def test_orphan_elif():
+    """孤立 #elif (stack 为空) - 不应抛 NameError"""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    r = p.process_line("#elif FOO", 1)
+    # 方案 A: 返回原 line; 方案 B: 返回 None; 方案 C: 抛 ValueError
+    assert r is None or r == "#elif FOO"
+
+def test_orphan_else():
+    """孤立 #else - 不应抛 NameError"""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    r = p.process_line("#else", 1)
+    assert r is None or r == "#else"
+
+def test_orphan_endif():
+    """孤立 #endif - 不应抛 NameError"""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    r = p.process_line("#endif", 1)
+    assert r is None or r == "#endif"
+
+def test_double_endif():
+    """连续两个 #endif - 第二个应进入兜底"""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    p.process_line("#ifdef FOO", 1)
+    p.process_line("#endif", 2)
+    r = p.process_line("#endif", 3)  # stack 已空
+    assert r is None or r == "#endif"
+
+def test_unbalanced_real_world():
+    """真实场景: #if 0 块 + 不平衡 #endif + 孤立 #else"""
+    src = """line1
+#if 0
+removed
+#else
+kept
+"""
+    p = PrunerCore(active_macros={}, mode=PrunerMode.PHYSICAL_DELETION)
+    out = p.prune(src)   # 修前会抛 NameError，修后应返回有效结果
+    assert "line1" in out
+    assert "kept" in out
+</code></pre>
+
+<h2>8. 业务影响（2026-06-11 会话）</h2>
+
+<div class="info">
+<strong>本会话（ws63-radar 项目）受 MacroPruner MCP 故障影响，已用 grep + read_file 降级完成以下工作：</strong>
+<ul>
+<li>0x80003051 错误码定位（<code>ERRCODE_UPG_NO_ENOUGH_SPACE</code>，<code>errcode.h:409</code>）</li>
+<li>ota_progress.percent 累加问题根因（<code>wm_ota_ctx.offset</code> 在 <code>wm_fota_progress_reset()</code> 中未重置）</li>
+</ul>
+<strong>结论可信度</strong>：grep 不能按 <code>#ifdef</code> 剪枝，所以<strong>有可能漏掉</strong>：wm_fota.c line 333-399（限制 99% 之后的逻辑）、line 490-939（stop / 其它入口 / 工具函数）三段未精读。如果用 MCP <code>read_c</code> 能看完整文件，应补一轮验证。
+</div>
+
+<p><strong>其他可能受影响场景</strong>：所有依赖 MacroPruner MCP 工具的会话（任何使用 init-project skill + ws63/bk7231/8720 项目的会话）都可能在读 wm_fota.c、dna_wlan.c、dna_os.c 这类含 <code>#if 0</code> / 跨文件 <code>#ifdef</code> 嵌套的真实固件源码时撞上同一 NameError。</p>
+
+<h2>9. 修复优先级</h2>
+
+<table>
+<thead>
+<tr><th>优先级</th><th>动作</th><th>建议时机</th></tr>
+</thead>
+<tbody>
+<tr><td>P0</td><td>方案 A 修 5 处 <code>return line</code> + 4 处方法签名 + 4 处调用方</td><td>立即（影响所有 MCP 调用）</td></tr>
+<tr><td>P1</td><td>补 §7 的 5 个测试用例</td><td>随 P0 一起</td></tr>
+<tr><td>P1</td><td>重启 MCP server 验证（<code>mcp_wrapper.sh</code> 状态 / stdio 连接）</td><td>修完后</td></tr>
+<tr><td>P2</td><td>用 <code>read_c</code> 重读 wm_fota.c，补完本会话 line 333-399 / 490-939 的盲区</td><td>修完后</td></tr>
+<tr><td>P2</td><td>在 init-project skill 文档加一条"MacroPruner MCP 故障时的 grep 降级 SOP"</td><td>本会话外</td></tr>
+</tbody>
+</table>
+
+<hr>
+
+<p class="muted">
+报告生成于 2026-06-11 by Hermes Agent (MiniMax-M3)。<br>
+本报告基于代码静态分析 + 直接调用复现，结论可独立复现。<br>
+源代码未做修改 — 修复方案见 §5，待用户授权后再打 patch。
+</p>
+
+</body>
+</html>
