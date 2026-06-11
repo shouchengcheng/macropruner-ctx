@@ -158,11 +158,18 @@ you ask for `target=PRODUCT_A` and the file has
 The header banner now includes the active backend name, so callers can
 verify which backend produced the result.
 
-### Next Steps (not started)
-- **Stage 4 (Token Budgeting):** Token counter + auto-skeletonization
-  when budget exceeded.
-- **Cross-validation CLI:** `macropruner --diff regex clang <file>` to
-  show where the two backends disagree.
+### Next Steps
+- **Stage 4 (Token Budgeting):** Done in P3-1. read_c accepts
+  `token_budget=N`; auto-degrades to skeleton when exceeded;
+  banner tags `[WARN] Over budget: ...` when neither fits.
+- **Cross-validation CLI:** `macropruner diff <file>` — done in
+  P2-3. Compares regex vs clang active-line sets, exits non-zero
+  on disagreement.
+- **Real SDK integration report:** `integration/ws63_integration_report.md`
+  documents behavior on a real ws63 firmware SDK (HiSilicon
+  riscv32 cross-compile, 30 MB compile_commands.json, 120+ -D
+  macros per .c). Compression 7% - 87% depending on file.
+- **End-to-end demo:** `demo/demo.sh` walks through all 8 major
+  features with pauses for screencast recording. ~10s total.
 - **Editor / LSP integration:** Pre-filter C/C++ buffers before sending
   to LSP.
-- **Stage 4 (Token Budgeting):** Rigid cap enforcement before LLM dispatch.

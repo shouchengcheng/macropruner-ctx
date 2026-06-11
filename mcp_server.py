@@ -66,6 +66,7 @@ def _prune_file(
     compile_db: str,
     mode: str = "physical",
     backend: str = "regex",
+    token_budget: int = 0,
 ) -> PruneResult:
     """Prune a C/C++ file via the chosen backend.
 
@@ -78,6 +79,10 @@ def _prune_file(
     when empty. The config lookup uses CWD as project_root (which is
     almost always the case for MCP — agents launch from the project
     root, not arbitrary subdirs).
+
+    `token_budget` (Stage 4) caps the output size. If the pruned
+    code exceeds the budget, the call automatically degrades to a
+    skeletonized view. 0 disables the cap.
     """
     if not target or not compile_db:
         cfg = load_config()
@@ -89,6 +94,11 @@ def _prune_file(
             resolved = resolve_compile_db(cfg, project_root=os.getcwd())
             if resolved:
                 compile_db = resolved
+        # Pull token_budget from config if not already set by the caller.
+        # The caller can override per-call; this is just a default.
+        budget_from_cfg = int(cfg.get("pruner.token_budget", 0))
+        if token_budget == 0 and budget_from_cfg:
+            token_budget = budget_from_cfg
 
     resolved_path = _resolve_file_path(file_path)
     if not resolved_path:
@@ -104,6 +114,66 @@ def _prune_file(
     result = inst.prune(resolved_path, target, compile_db, mode=mode)
     result.effective_target = target
     result.effective_compile_db = compile_db
+
+    # Stage 4: enforce token budget. If the pruned output is over
+    # the caller's budget, fall back to the skeleton view (which
+    # strips function bodies and is typically 70-90% smaller than
+    # the fully-pruned code). If even the skeleton is over budget,
+    # tag the result as a WARN so the LLM can decide to chunk
+    # further or ignore the budget for this call.
+    if token_budget and token_budget > 0:
+        result = _enforce_budget(
+            result, token_budget, resolved_path, target, compile_db, mode, backend,
+        )
+
+    return result
+
+
+def _enforce_budget(
+    result: PruneResult,
+    budget: int,
+    file_path: str,
+    target: str,
+    compile_db: str,
+    mode: str,
+    backend: str,
+) -> PruneResult:
+    """Auto-degrade a PruneResult that exceeds the token budget.
+
+    Strategy:
+      1. If pruned_tokens <= budget: return as-is.
+      2. Otherwise, run Skeletonizer over the pruned code. If the
+         skeleton fits: return skeleton with extra metadata.
+      3. If neither fits: keep the pruned code but tag the result
+         with a WARN — the LLM will see it via PruneResult.extra.
+    """
+    tok = result.token_estimate
+    if tok["pruned_tokens"] <= budget:
+        return result
+
+    # Try skeletonize.
+    skel = Skeletonizer()
+    skeleton = skel.skeletonize(result.code)
+    skel_stats = skel.get_stats()
+    # Re-estimate tokens on the skeleton (char count is what
+    # matters for the budget check; the skeleton body is plain C).
+    from token_counter import char_estimate
+    skel_tokens = char_estimate(skeleton)
+
+    if skel_tokens <= budget:
+        # Skeleton fits. Replace the code in the result.
+        result.code = skeleton
+        result.pruned_lines = skel_stats["skeleton_lines"]
+        result.extra["budget_degraded"] = "skeleton"
+        result.extra["budget_pruned_tokens"] = str(tok["pruned_tokens"])
+        result.extra["budget_skel_tokens"] = str(skel_tokens)
+        return result
+
+    # Neither fits. Tag as over-budget; let the caller decide.
+    result.extra["budget_exceeded"] = "true"
+    result.extra["budget_requested"] = str(budget)
+    result.extra["budget_pruned_tokens"] = str(tok["pruned_tokens"])
+    result.extra["budget_skel_tokens"] = str(skel_tokens)
     return result
 
 
@@ -127,7 +197,8 @@ def _prune_file(
     "  Falls back to `pruner.compile_db` from .macroprunerrc, or auto-discovered\n"
     "  in build/compile_commands.json.\n"
     "- mode (optional): 'physical' (default, removes inactive lines) or 'virtual' (keeps line numbers with markers)\n"
-    "- backend (optional): 'regex' (default, fast pure-Python) | 'clang' (slower, ground truth via clang -E) | 'auto' (prefers clang if available, falls back to regex)",
+    "- backend (optional): 'regex' (default, fast pure-Python) | 'clang' (slower, ground truth via clang -E) | 'auto' (prefers clang if available, falls back to regex)\n"
+    "- token_budget (optional): Maximum LLM tokens for the output. 0 = no cap (default). If exceeded, output auto-degrades to skeleton (function bodies stripped). Result tagged with [WARN] if even the skeleton exceeds the cap.",
 )
 def read_c(
     file_path: str,
@@ -135,6 +206,7 @@ def read_c(
     compile_db: str = "",
     mode: str = "physical",
     backend: str = "regex",
+    token_budget: int = 0,
 ) -> str:
     """Read and prune a C/C++ source file.
 
@@ -157,6 +229,7 @@ def read_c(
     try:
         result = _prune_file(
             file_path, target, compile_db=compile_db, mode=mode, backend=backend,
+            token_budget=token_budget,
         )
 
         # Build the summary header. The clang backend already prepends
@@ -165,6 +238,22 @@ def read_c(
             return result.code
 
         tok = result.token_estimate
+
+        # Detect budget-related degradation.
+        degraded_to = result.extra.get("budget_degraded", "")
+        over_budget = result.extra.get("budget_exceeded", "false") == "true"
+        budget_line = ""
+        if degraded_to:
+            budget_line = (
+                f"/* Degraded: {degraded_to:<32} */\n"
+            )
+        elif over_budget:
+            budget_line = (
+                f"/* [WARN] Over budget: pruned={result.extra.get('budget_pruned_tokens', '?')}, "
+                f"skel={result.extra.get('budget_skel_tokens', '?')}, "
+                f"cap={result.extra.get('budget_requested', '?')} */\n"
+            )
+
         summary = (
             f"/* --- MacroPruner-Ctx ---------------------------- */\n"
             f"/* Target:    {result.effective_target:<36}*/\n"
@@ -174,7 +263,8 @@ def read_c(
             f"({tok['saved_pct']}%)                  */\n"
             f"/* Mode:      {mode}                                */\n"
             f"/* Backend:   {result.backend_name}                              */\n"
-            f"/* ------------------------------------------------ */\n\n"
+            + (budget_line if budget_line else "")
+            + f"/* ------------------------------------------------ */\n\n"
         )
         return summary + result.code
 
