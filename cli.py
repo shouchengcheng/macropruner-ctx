@@ -34,12 +34,14 @@ from config import load as load_config, resolve_compile_db
 def _resolve_args(args: argparse.Namespace) -> tuple:
     """Merge CLI flags with .macroprunerrc defaults.
 
-    Returns: (target, compile_db, mode, backend)
+    Returns: (target, compile_db, mode, backend, sysroot, extra_target)
     """
     cfg = load_config()
     target = args.target or cfg.get("pruner.default_target", "") or "DEFAULT"
     backend = getattr(args, "backend", None) or cfg.get("pruner.default_backend", "regex")
     mode = getattr(args, "mode", None) or cfg.get("pruner.default_mode", "physical")
+    sysroot = getattr(args, "sysroot", "") or cfg.get("pruner.sysroot", "") or ""
+    extra_target = getattr(args, "extra_target", "") or cfg.get("pruner.extra_target", "") or ""
     if getattr(args, "cdb", ""):
         compile_db = args.cdb
     else:
@@ -50,13 +52,13 @@ def _resolve_args(args: argparse.Namespace) -> tuple:
         file_dir = os.path.dirname(os.path.abspath(args.file)) if getattr(args, "file", None) else os.getcwd()
         resolved = resolve_compile_db(cfg, project_root=file_dir)
         compile_db = resolved or ""
-    return target, compile_db, mode, backend
+    return target, compile_db, mode, backend, sysroot, extra_target
 
 
 def _prune(args: argparse.Namespace, skeletonize: bool = False) -> int:
     from backends import get_backend
 
-    target, compile_db, mode, backend = _resolve_args(args)
+    target, compile_db, mode, backend, sysroot, extra_target = _resolve_args(args)
     if not compile_db:
         print(
             "[FATAL] No compile_commands.json found. Pass --cdb, drop a "
@@ -65,7 +67,11 @@ def _prune(args: argparse.Namespace, skeletonize: bool = False) -> int:
         )
         return 1
     try:
-        inst = get_backend(backend)
+        inst = get_backend(
+            backend,
+            sysroot=sysroot or None,
+            extra_target=extra_target or None,
+        )
     except (ValueError, RuntimeError) as e:
         print(f"[FATAL] {e}", file=sys.stderr)
         return 1
@@ -114,7 +120,7 @@ def _diff(args: argparse.Namespace) -> int:
     """Print unified diff between regex and clang backends."""
     import difflib
 
-    target, compile_db, mode, _ = _resolve_args(args)
+    target, compile_db, mode, _, sysroot, extra_target = _resolve_args(args)
     if not compile_db:
         print(
             "[FATAL] No compile_commands.json found. Pass --cdb or configure.",
@@ -126,7 +132,11 @@ def _diff(args: argparse.Namespace) -> int:
 
     try:
         regex_result = get_backend("regex").prune(args.file, target, compile_db, mode=mode)
-        clang_inst = get_backend("clang")
+        clang_inst = get_backend(
+            "clang",
+            sysroot=sysroot or None,
+            extra_target=extra_target or None,
+        )
         if not clang_inst.is_available()[0]:
             print("[FATAL] clang backend not available; cannot run diff", file=sys.stderr)
             return 1
@@ -192,6 +202,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_read.add_argument("--cdb", default="", help="Path to compile_commands.json")
     p_read.add_argument("--mode", choices=["physical", "virtual"], default="")
     p_read.add_argument("--backend", choices=["regex", "clang", "auto"], default="")
+    p_read.add_argument("--sysroot", default="", help="Clang-only: cross-compile SDK sysroot path")
+    p_read.add_argument("--target-arg", dest="extra_target", default="",
+                        help="Clang-only: --target= value (e.g. riscv32-linux-musl)")
 
     p_skel = sub.add_parser("skeleton", help="Prune + skeletonize")
     p_skel.add_argument("file")
@@ -199,6 +212,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_skel.add_argument("--cdb", default="")
     p_skel.add_argument("--mode", choices=["physical", "virtual"], default="")
     p_skel.add_argument("--backend", choices=["regex", "clang", "auto"], default="")
+    p_skel.add_argument("--sysroot", default="")
+    p_skel.add_argument("--target-arg", dest="extra_target", default="")
 
     p_diff = sub.add_parser(
         "diff", help="Compare regex vs clang backends on the same file"
@@ -207,6 +222,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_diff.add_argument("--target", default="")
     p_diff.add_argument("--cdb", default="")
     p_diff.add_argument("--mode", choices=["physical", "virtual"], default="")
+    p_diff.add_argument("--sysroot", default="")
+    p_diff.add_argument("--target-arg", dest="extra_target", default="")
 
     args = parser.parse_args(argv)
     if args.cmd == "read":

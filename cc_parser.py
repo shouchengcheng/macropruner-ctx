@@ -187,6 +187,21 @@ class CompileDBParser:
 
         return include_dirs
 
+    def get_entry_tokens_for_file(self, source_file: str) -> Optional[List[str]]:
+        """Return the full tokenized command for a source file's entry,
+        or None if no entry matches.
+
+        Useful for backends that want to reuse the project's compile
+        flags (e.g. -march, -mabi, -isystem, --target=, --sysroot=)
+        instead of hand-rolling them.
+        """
+        entries = self._load()
+        target = Path(source_file).resolve()
+        for entry in entries:
+            if self._resolve_entry_path(entry) == target:
+                return self._tokenize_command(entry)
+        return None
+
 
 def extract_macros_for_file(
     compile_db_path: str, source_file: str

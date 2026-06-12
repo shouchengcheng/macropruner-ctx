@@ -165,6 +165,14 @@ verify which backend produced the result.
 - **Cross-validation CLI:** `macropruner diff <file>` — done in
   P2-3. Compares regex vs clang active-line sets, exits non-zero
   on disagreement.
+- **Cross-compile SDK support (P4-1):** clang backend now inherits
+  the project's compile_db entry's flags (--target, -march, -mabi
+  etc.) and accepts a user-supplied sysroot. Verified end-to-end
+  against a mock riscv32-linux-musl sysroot in
+  `tests/sysroot_demo`. The regex backend was always cross-SDK
+  ready; the clang backend was previously blocked on riscv-specific
+  gcc optimization flags (-fno-ipa-ra etc.), now handled by a
+  catch-all "-f" drop in `_filter_tokens_for_clang`.
 - **Real SDK integration report:** `integration/ws63_integration_report.md`
   documents behavior on a real ws63 firmware SDK (HiSilicon
   riscv32 cross-compile, 30 MB compile_commands.json, 120+ -D

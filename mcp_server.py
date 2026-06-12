@@ -67,6 +67,8 @@ def _prune_file(
     mode: str = "physical",
     backend: str = "regex",
     token_budget: int = 0,
+    sysroot: str = "",
+    extra_target: str = "",
 ) -> PruneResult:
     """Prune a C/C++ file via the chosen backend.
 
@@ -83,6 +85,11 @@ def _prune_file(
     `token_budget` (Stage 4) caps the output size. If the pruned
     code exceeds the budget, the call automatically degrades to a
     skeletonized view. 0 disables the cap.
+
+    `sysroot` and `extra_target` are clang-backend specific. They
+    override the auto-detection from the compile_db entry's command
+    — useful for cross-compile SDKs where the default sysroot
+    clang picks is wrong.
     """
     if not target or not compile_db:
         cfg = load_config()
@@ -99,6 +106,13 @@ def _prune_file(
         budget_from_cfg = int(cfg.get("pruner.token_budget", 0))
         if token_budget == 0 and budget_from_cfg:
             token_budget = budget_from_cfg
+        # Same idea for sysroot / extra_target: read from config when
+        # the caller didn't pass them. Useful for cross-compile SDKs
+        # where the LLM probably doesn't know the sysroot path.
+        if not sysroot:
+            sysroot = cfg.get("pruner.sysroot", "") or ""
+        if not extra_target:
+            extra_target = cfg.get("pruner.extra_target", "") or ""
 
     resolved_path = _resolve_file_path(file_path)
     if not resolved_path:
@@ -107,7 +121,7 @@ def _prune_file(
         raise FileNotFoundError(f"compile_commands.json not found: {compile_db}")
 
     try:
-        inst = get_backend(backend)
+        inst = get_backend(backend, sysroot=sysroot or None, extra_target=extra_target or None)
     except (ValueError, RuntimeError):
         inst = get_backend("regex")
 
@@ -198,7 +212,9 @@ def _enforce_budget(
     "  in build/compile_commands.json.\n"
     "- mode (optional): 'physical' (default, removes inactive lines) or 'virtual' (keeps line numbers with markers)\n"
     "- backend (optional): 'regex' (default, fast pure-Python) | 'clang' (slower, ground truth via clang -E) | 'auto' (prefers clang if available, falls back to regex)\n"
-    "- token_budget (optional): Maximum LLM tokens for the output. 0 = no cap (default). If exceeded, output auto-degrades to skeleton (function bodies stripped). Result tagged with [WARN] if even the skeleton exceeds the cap.",
+    "- token_budget (optional): Maximum LLM tokens for the output. 0 = no cap (default). If exceeded, output auto-degrades to skeleton (function bodies stripped). Result tagged with [WARN] if even the skeleton exceeds the cap.\n"
+    "- sysroot (optional): Clang-backend only. Path to a cross-compile SDK's sysroot (e.g. /opt/ws63/tools/sysroot). If omitted, auto-detected from the compile_db entry's --sysroot= flag. Falls back to clang's default sysroot for native builds.\n"
+    "- extra_target (optional): Clang-backend only. --target= value to pass to clang (e.g. 'riscv32-linux-musl'). Auto-detected from the compile_db entry if not given.\n",
 )
 def read_c(
     file_path: str,
@@ -207,6 +223,8 @@ def read_c(
     mode: str = "physical",
     backend: str = "regex",
     token_budget: int = 0,
+    sysroot: str = "",
+    extra_target: str = "",
 ) -> str:
     """Read and prune a C/C++ source file.
 
@@ -229,7 +247,7 @@ def read_c(
     try:
         result = _prune_file(
             file_path, target, compile_db=compile_db, mode=mode, backend=backend,
-            token_budget=token_budget,
+            token_budget=token_budget, sysroot=sysroot, extra_target=extra_target,
         )
 
         # Build the summary header. The clang backend already prepends

@@ -154,7 +154,8 @@ def get_backend(name: str, **kwargs) -> PrunerBackend:
 
     Args:
         name: 'regex', 'clang', or 'auto'.
-        **kwargs: Forwarded to backend __init__.
+        **kwargs: Forwarded to backend __init__ (e.g. `sysroot=` for
+                  the clang backend on cross-compile SDKs).
 
     Raises:
         ValueError: Unknown backend name.
@@ -168,7 +169,11 @@ def get_backend(name: str, **kwargs) -> PrunerBackend:
             cls = _REGISTRY.get(candidate)
             if cls is None:
                 continue
-            inst = cls(**kwargs)
+            try:
+                inst = cls(**kwargs)
+            except TypeError:
+                # Backend doesn't accept these kwargs — skip it.
+                continue
             ok, _reason = inst.is_available()
             if ok:
                 return inst
@@ -184,7 +189,14 @@ def get_backend(name: str, **kwargs) -> PrunerBackend:
             f"Unknown backend: {name!r}. "
             f"Available: {sorted(_REGISTRY.keys())}"
         )
-    inst = cls(**kwargs)
+    try:
+        inst = cls(**kwargs)
+    except TypeError as e:
+        # Specific backend doesn't accept these kwargs; retry without them.
+        if kwargs:
+            inst = cls()
+        else:
+            raise RuntimeError(f"Backend {name!r} init failed: {e}")
     ok, reason = inst.is_available()
     if not ok:
         raise RuntimeError(f"Backend {name!r} not available: {reason}")

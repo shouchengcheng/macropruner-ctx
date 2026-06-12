@@ -38,6 +38,9 @@ DEFAULTS: Dict[str, Any] = {
     "pruner.default_max_depth": 2,
     "pruner.token_budget": 0,           # 0 = no cap (Stage 4 placeholder)
     "pruner.include_dirs": [],          # extra -I for headers
+    # Cross-compile SDK support for the clang backend (P4-1).
+    "pruner.sysroot": "",               # path to a cross-compile SDK's sysroot
+    "pruner.extra_target": "",          # e.g. 'riscv32-linux-musl'
 }
 
 
