@@ -1,6 +1,6 @@
 # MacroPruner-Ctx — Usage Guide
 
-This is the full operator's manual. The README is the elevator pitch; this document is the workshop.
+This is the operator's manual. The [README](../README.md) is the elevator pitch; this document is the workshop.
 
 ## 1. Concepts
 
@@ -24,7 +24,12 @@ The compression is "free" in the sense that the LLM never needed to see the inac
 
 ### 1.2 The two backends
 
-**regex** is the default. It implements a full C preprocessor expression evaluator in pure Python. It understands `defined()`, `&&`/`||`/`!`, `MACRO == N`, `IS_ENABLED()`, hex literals, case-insensitive matching, numeric macro values. Output preserves the original C structure — macros stay as macros, includes stay as includes. **Use this for normal LLM reading.**
+| Backend | Speed | Output | When to use |
+|---|---|---|---|
+| `regex` | Fast | Original C structure, macros intact | **Default; what LLMs should read** |
+| `clang` | Slower | Fully preprocessed (macros expanded, includes inlined) | Ground-truth oracle for cross-validation |
+
+**regex** implements a full C preprocessor expression evaluator in pure Python. It understands `defined()`, `&&`/`||`/`!`, `MACRO == N`, `IS_ENABLED()`, hex literals, case-insensitive matching, numeric macro values. The output preserves the original C structure — macros stay as macros, includes stay as includes. **Use this for normal LLM reading.**
 
 **clang** wraps the actual `clang -E` preprocessor. The output is *fully preprocessed* — macros expanded, includes inlined. **This is not what you want the LLM to read** (the structure is gone), but it's the ground truth: if `clang -E` says this code survives when compiled for target X, then the regex backend should agree. **Use it to cross-validate suspicious regex output, never for routine LLM context.**
 
@@ -34,11 +39,31 @@ The compression is "free" in the sense that the LLM never needed to see the inac
 
 The pruner applies three reductions in order:
 
-1. **Macro pruning** (always on). Drops `#if MACRO != active_value` blocks.
+1. **Macro pruning** (always on, `read_c`). Drops `#if MACRO != active_value` blocks.
 2. **Skeletonization** (only with `read_c_skeleton`). Strips function bodies, keeps signatures.
-3. **Dependency graphing** (only with `read_c_with_deps`). Walks the include tree, target file fully pruned, dependency files pruned + skeletonized. Stage 3 Phase 2: includes inside inactive `#if` blocks are NOT followed.
+3. **Dependency graphing** (only with `read_c_with_deps`). Walks the include tree, target file fully pruned, dependency files pruned + skeletonized. **Stage 3 Phase 2: includes inside inactive `#if` blocks are NOT followed.**
 
 You can stack stages 1 + 3, but not 2 + 3 (skeletonizing a target that already has skeletonized dependencies is redundant and confusing).
+
+### 1.4 The four sources of truth for the pruner's input
+
+When the LLM calls `read_c("src/main.c")` with no other arguments, the pruner needs to know:
+
+- **What macros are active** → from `compile_commands.json`'s `-D` flags
+- **What include paths to follow** → from `-I` in the same file
+- **What `#if` conditions to evaluate** → from those active macros
+- **What file to read** → from `file_path`
+
+In priority order, the LLM / config / compile_db supply this information:
+
+| Source | Priority | Example |
+|---|---|---|
+| MCP call argument | Highest | `read_c(file_path="...", target="X")` |
+| `.macroprunerrc` | Middle | `default_target = X` in the project root |
+| `compile_commands.json` | Lowest | The `-DCHIP_WS63=1 -DPRODUCT_TYPE=3` flags |
+| Hard-coded fallback | Last resort | `target="DEFAULT"` placeholder |
+
+---
 
 ## 2. Installation
 
@@ -65,20 +90,41 @@ The `.venv` is required: MCP SDK needs Python 3.10+, and a venv keeps its depend
 .venv/bin/python test_conditional_dep_graph.py
 .venv/bin/python test_cc_parser_cache.py
 .venv/bin/python test_config.py
+.venv/bin/python test_errors.py
+.venv/bin/python test_token_budget.py
+.venv/bin/python test_clang_sysroot.py
+.venv/bin/python test_patch_applier.py
+.venv/bin/python test_cli.py
 .venv/bin/python test_backends.py
 .venv/bin/python test_mcp_server.py
 ```
 
-All 9 suites should print `All tests passed!` or `=== N/N passed ===`.
+All 15 suites should print `All tests passed!` or `=== N/N passed ===`.
+
+### 2.3 Optional: clang for the oracle backend
+
+The regex backend works out of the box. For the clang backend (ground-truth oracle):
+
+```bash
+# Ubuntu / Debian
+sudo apt install clang
+
+# macOS
+brew install llvm
+```
+
+The backend looks for `clang`, `clang-14`, `clang-13`, etc. on PATH. If none is found, `is_available()` returns False and the backend gracefully falls back to `regex`.
+
+---
 
 ## 3. Project-level configuration
 
 ### 3.1 The `.macroprunerrc` file
 
-Put this in your project root:
+Put this in your project root (NOT the macropruner-ctx directory):
 
 ```ini
-# /home/me/my-firmware/.macroprunerrc
+# .macroprunerrc
 
 # Default target when MCP calls omit the target arg.
 default_target    = PRODUCT_3
@@ -103,17 +149,29 @@ default_mode      = physical
 # read_c_with_deps traversal depth (1-5).
 default_max_depth = 2
 
-# Token budget cap. 0 = unlimited. (Stage 4 feature; currently
-# documented but not enforced.)
+# Token budget cap. 0 = unlimited. (Stage 4; enforced in P3-1.)
 token_budget      = 0
 
 # Extra -I include directories.
 include_dirs      = [third_party/inc, vendor/inc]
+
+# ─── Cross-compile SDK support for the clang backend (P4-1) ───
+# Path to your SDK's sysroot. Without this, clang's default
+# sysroot has no idea where the SDK's headers live, so
+# #include resolution fails on real-world SDKs.
+# Required for riscv32-linux-musl, aarch64-linux-gnu, etc.
+pruner.sysroot = /opt/ws63-sdk/sysroot
+
+# Optional. Override the --target= value clang sees. If the
+# compile_db entry's command already has --target= that wins.
+# Otherwise the inherited -march / -mabi from the cdb is used
+# (clang 14+ can usually infer a target from those).
+pruner.extra_target = riscv32-linux-musl
 ```
 
 ### 3.2 Search order
 
-When the tool needs `target` or `compile_db`, it searches:
+When the tool needs `target`, `compile_db`, or `sysroot`, it searches:
 
 1. The MCP call's argument (highest priority)
 2. `$MACROPRUNER_CONFIG` env var (absolute path to a custom config file)
@@ -134,6 +192,10 @@ pruner.default_target = PRODUCT_A
 [pruner]
 default_target = PRODUCT_A
 ```
+
+Full reference: [docs/CONFIG.md](CONFIG.md).
+
+---
 
 ## 4. MCP integration
 
@@ -168,6 +230,8 @@ Restart Claude Desktop. The four tools will appear in the tool list.
 
 Any client that supports stdio MCP works. Point it at `python3 mcp_server.py` (or the wrapper) and you're done.
 
+---
+
 ## 5. The four tools in detail
 
 ### 5.1 `read_c` — the workhorse
@@ -179,6 +243,9 @@ read_c(
     compile_db: str = "",          # optional, falls back to .macroprunerrc
     mode: str = "physical",        # 'physical' or 'virtual'
     backend: str = "regex",        # 'regex' | 'clang' | 'auto'
+    token_budget: int = 0,         # Stage 4 cap; 0 = no cap
+    sysroot: str = "",             # Clang-only: cross-compile SDK sysroot
+    extra_target: str = "",        # Clang-only: --target= value
 )
 ```
 
@@ -186,7 +253,7 @@ read_c(
 
 ```
 /* --- MacroPruner-Ctx ---------------------------- */
-/* Target:    PRODUCT_3                            */
+/* Target:    PRODUCT_3                           */
 /* Lines:     187/420 dropped (44.5%)              */
 /* Tokens:    1230/2870 saved (42.9%)              */
 /* Mode:      physical                             */
@@ -197,6 +264,13 @@ read_c(
 ```
 
 The "Tokens" number is an estimate, not a billing figure. It's `chars / 3.7`, calibrated against cl100k and o200k tokenizers (the ones used by GPT-4 and Claude 3.5). Accuracy: ±15% for code.
+
+When `token_budget` is set, the banner adds an extra line:
+
+```
+/* Degraded: skeleton                       */   # pruned → skeleton, fits
+/* [WARN] Over budget: pruned=1850, skel=711, cap=80 */   # neither fits
+```
 
 **When to use:** Anytime you want to look at a single C file with cleanup.
 
@@ -220,6 +294,21 @@ Same arguments as `read_c`, but additionally strips all function bodies. Keeps:
 
 Replaces function bodies with `{ /* ... */ }`.
 
+```
+/* --- MacroPruner-Ctx (Skeleton) ----------------- */
+/* Target:    PRODUCT_3                           */
+/* Original:  1588 lines                            */
+/* Skeleton:  63 lines                             */
+/* Stripped:  15 functions                         */
+/* Backend:   regex                                */
+/* ------------------------------------------------ */
+
+#include "uart.h"
+... (struct definitions, signatures)
+int uart_init(struct uart_ctrl *);
+{ /* ... */ }
+```
+
 **When to use:** When you're new to a file and want a quick map. Saves 70-90% of tokens vs `read_c` for typical files.
 
 **When NOT to use:** When you need implementation details (use `read_c`).
@@ -239,10 +328,31 @@ read_c_with_deps(
 Prunes the target file fully, then walks the `#include` tree. For each dependency:
 - Resolves the include path using `-I` from compile_db
 - Prunes with the same target
+- **Skips includes inside inactive `#if` blocks** (Stage 3 Phase 2)
 - Skeletonizes (function bodies stripped)
 - Emits a section per file
 
-**Stage 3 Phase 2:** includes inside inactive `#if` blocks are NOT followed. This is the killer feature — without it, the LLM hallucinates about structs defined in headers the target product never compiles.
+```
+/* --- MacroPruner-Ctx (with deps) ------------------ */
+/* Target: PRODUCT_3                                */
+/* Root: main.c                                      */
+/* Dependencies: 3 files                             */
+/* Max depth: 2                                      */
+/* Mode: physical                                    */
+/* Backend: regex                                    */
+/* ------------------------------------------------- */
+
+/* ══ TARGET FILE: main.c ═══════════════════════ */
+/* Original: 230 lines | Pruned: 95 lines            */
+
+void main(void) { ... }
+
+/* ══ DEPENDENCY: proto.h ═══════════════════════ */
+/* Skeleton: 12 lines | Functions stripped: 3       */
+
+typedef struct {...};
+int proto_version(void);
+```
 
 **When to use:** When the LLM needs to understand cross-file relationships. "What does this struct look like? What other functions are in this module?" Without `with_deps`, the LLM would need a separate `read_c_skeleton` call per header, and would still miss the macro-aware filtering.
 
@@ -265,7 +375,7 @@ Validates the diff against the original file, applies it, and returns:
 
 The LLM should generate the diff after reading the pruned file with `read_c`. Patch the **original** file, not the pruned view (the pruned view has dead code removed; the patch references original line numbers).
 
-Backend selection:
+**Backend selection:**
 - If the file is in a git working tree, `git apply --check` + `git apply` is tried first (the most reliable path)
 - Otherwise (or if git rejects the diff), a built-in pure-Python applier kicks in
 - The applier does NOT do fuzzy matching; if the diff's `@@ -N,M @@` line offsets don't match the current file, it fails loudly
@@ -273,6 +383,8 @@ Backend selection:
 **When to use:** After the LLM proposes a change and you want to commit it.
 
 **When NOT to use:** When the diff's offsets have drifted (regenerate from current file content first). For non-unified-diff workflows, use git apply / patch directly.
+
+---
 
 ## 6. Backend selection: when each makes sense
 
@@ -284,11 +396,17 @@ Backend selection:
 │ Output looks suspicious         │ clang              │
 │ CI gate, no clang available     │ regex (forced)     │
 │ Quick debugging, want truth     │ clang              │
-│ Cross-checking two implementations│ both, diff them   │
+│ Cross-checking implementations │ both, diff them   │
+│ Cross-compile SDK (riscv32)     │ regex + sysroot    │
+│ Clang oracle + cross-compile    │ clang + --sysroot  │
 └──────────────────────────────────┴────────────────────┘
 ```
 
 The `auto` mode picks clang when available. If you want to force a specific backend, pass it explicitly.
+
+For the cross-compile case, see [docs/BACKENDS.md](BACKENDS.md).
+
+---
 
 ## 7. The #if grammar (regex backend)
 
@@ -319,6 +437,8 @@ Numeric values come from compile_db's `-D` flags. `-DARCH=2` makes `ARCH` evalua
 
 If you hit a real codebase that needs one of these, the parser raises `ValueError` and the pruner falls back to treating the block as inactive. No silent wrong answers.
 
+---
+
 ## 8. Performance and caching
 
 ### 8.1 compile_commands.json cache
@@ -327,11 +447,26 @@ If you hit a real codebase that needs one of these, the parser raises `ValueErro
 
 Cap: 16 entries (LRU-ish by mtime). For typical projects with one or two build directories, this never evicts.
 
-Disable cache: import `cc_parser` and call `clear_cache()`. The MCP server doesn't expose this — it's for tests and tooling.
+Disable cache: `from cc_parser import clear_cache`. The MCP server doesn't expose this — it's for tests and tooling.
 
 ### 8.2 Token estimation
 
 Token counts in the output banner use a character-based estimator (`chars / 3.7`) calibrated against cl100k and o200k. Accuracy: ±15% for code. For exact counts, run the output through `tiktoken` or your vendor's SDK yourself.
+
+### 8.3 Per-call latency
+
+| Operation | Time |
+|---|---|
+| `cli.py read` single file (< 100KB) | 0.1 - 0.2s |
+| `cli.py skeleton` single file | 0.1s |
+| `cli.py diff` (regex part) | 0.1s |
+| MCP `read_c` (stdio roundtrip) | 0.5 - 0.6s |
+| 30MB cdb first load (one-time) | < 0.05s (subsequent: cache hit) |
+| clang backend (cold, cross-compile SDK) | 0.5s |
+
+MCP stdio roundtrip is dominated by JSON-RPC serialization + Hermes / Claude Desktop scheduling, not by the pruner.
+
+---
 
 ## 9. Workflows
 
@@ -369,7 +504,26 @@ read_c(file_path="src/main.c", target="X", backend="clang")
 # the clang output doesn't, that's a pruner bug.
 ```
 
-### 9.4 Bulk pruning for offline analysis
+### 9.4 Cross-compile SDK oracle (P4-1)
+
+```bash
+# Tell the regex backend where the cross SDK is via .macroprunerrc:
+cat > .macroprunerrc <<'EOF'
+default_target = ws63
+compile_db     = build/compile_commands.json
+pruner.sysroot = /opt/ws63-sdk/sysroot
+pruner.extra_target = riscv32-linux-musl
+EOF
+
+# Now clang can also do its job on the cross SDK:
+.venv/bin/python cli.py read uart.c --backend clang
+# or via MCP:
+read_c(file_path="src/uart.c", backend="clang")
+```
+
+See [docs/BACKENDS.md](BACKENDS.md) for the full cross-compile workflow.
+
+### 9.5 Bulk pruning for offline analysis
 
 The backend module is importable directly:
 
@@ -382,11 +536,15 @@ print(f"Saved {result.reduction_percentage}% of lines")
 print(result.code)
 ```
 
+For batch jobs, pre-warm the cache by calling `_prune_file` once with any project file; subsequent calls skip the cdb parse.
+
+---
+
 ## 10. Troubleshooting
 
 ### 10.1 "no clang binary found on PATH"
 
-`clang` backend is unavailable. Either install clang or pass `backend="regex"` (or `backend="auto"`, which falls back automatically).
+`clang` backend is unavailable. Either install clang (see §2.3) or pass `backend="regex"` (or `backend="auto"`, which falls back automatically).
 
 ### 10.2 Output is unchanged from input
 
@@ -403,6 +561,47 @@ Set `MACROPRUNER_CONFIG=/abs/path/to/.macroprunerrc` and check `default_target` 
 ### 10.5 read_c_with_deps skips a header I expected
 
 Stage 3 Phase 2: that header is inside an inactive `#if` block. Verify with `mode="virtual"` on the root file.
+
+### 10.6 clang fails on cross-compile SDK
+
+Pass `sysroot` (CLI `--sysroot`, MCP `sysroot=`, or `.macroprunerrc` `pruner.sysroot`). See [docs/BACKENDS.md](BACKENDS.md).
+
+### 10.7 apply_patch fails with "context mismatch"
+
+The diff's line offsets have drifted from the current file. Regenerate the diff against the current file content. The applier does NOT do fuzzy matching by design — this is a feature, not a bug (silent fuzzy matches are how bugs creep in).
+
+### 10.8 Cache is stale after editing compile_commands.json
+
+`CompileDBParser` invalidates the cache on mtime change. If you suspect a stale cache, call `from cc_parser import clear_cache` (or restart the MCP server).
+
+---
+
+## 11. Reference
+
+### 11.1 MCP tool parameters
+
+| Tool | Required | Optional | Defaults to |
+|---|---|---|---|
+| `read_c` | `file_path` | `target`, `compile_db`, `mode`, `backend`, `token_budget`, `sysroot`, `extra_target` | `.macroprunerrc` or built-in |
+| `read_c_skeleton` | `file_path` | `target`, `compile_db`, `mode` | same |
+| `read_c_with_deps` | `file_path` | `target`, `compile_db`, `mode`, `max_depth` | same; `max_depth=2` |
+| `apply_patch` | `file_path`, `diff` | — | — |
+
+### 11.2 `.macroprunerrc` keys
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `pruner.default_target` | string | `""` | Default target for the MCP tools |
+| `pruner.compile_db` | path | `""` | Path to `compile_commands.json` |
+| `pruner.default_backend` | string | `"regex"` | `regex` / `clang` / `auto` |
+| `pruner.default_mode` | string | `"physical"` | `physical` / `virtual` |
+| `pruner.default_max_depth` | int | `2` | `read_c_with_deps` traversal depth |
+| `pruner.token_budget` | int | `0` | Stage 4 cap (P3-1); 0 = unlimited |
+| `pruner.include_dirs` | list of strings | `[]` | Extra `-I` paths |
+| `pruner.sysroot` | string | `""` | Clang-only: cross-compile SDK sysroot (P4-1) |
+| `pruner.extra_target` | string | `""` | Clang-only: `--target=` value (P4-1) |
+
+---
 
 ## 12. The standalone CLI
 
@@ -433,12 +632,16 @@ CLI flags (all optional; fall back to `.macroprunerrc`):
 | `--cdb PATH` | Path to `compile_commands.json` |
 | `--mode physical\|virtual` | Pruning mode |
 | `--backend regex\|clang\|auto` | Backend selection |
+| `--sysroot PATH` | Clang-only: cross-compile SDK sysroot |
+| `--target-arg ARCH` | Clang-only: `--target=` value |
 
 Exit codes:
 - `0` — success (or warnings only)
 - `1` — fatal error (file not found, malformed diff, etc.)
 
 `.macroprunerrc` lookup uses the file's directory as project root, not cwd, so `python3 cli.py read /any/path/file.c` will pick up the config from the file's project, not the caller's.
+
+---
 
 ## 13. Error handling
 
@@ -453,25 +656,4 @@ In your LLM prompt you can include a one-liner like:
 
 The same convention is used by the CLI on stderr.
 
-## 11. Reference
-
-### 11.1 MCP tool parameters
-
-| Tool | Required | Optional | Defaults to |
-|---|---|---|---|
-| `read_c` | `file_path` | `target`, `compile_db`, `mode`, `backend` | `.macroprunerrc` or built-in |
-| `read_c_skeleton` | `file_path` | `target`, `compile_db`, `mode` | same |
-| `read_c_with_deps` | `file_path` | `target`, `compile_db`, `mode`, `max_depth` | same; `max_depth=2` |
-| `apply_patch` | `file_path`, `diff` | — | — |
-
-### 11.2 `.macroprunerrc` keys
-
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `default_target` | string | `""` | Default target for the MCP tools |
-| `compile_db` | path | `""` | Path to `compile_commands.json` |
-| `default_backend` | string | `"regex"` | `regex` / `clang` / `auto` |
-| `default_mode` | string | `"physical"` | `physical` / `virtual` |
-| `default_max_depth` | int | `2` | `read_c_with_deps` traversal depth |
-| `token_budget` | int | `0` | Stage 4 placeholder |
-| `include_dirs` | list of strings | `[]` | Extra `-I` paths |
+Full reference: [docs/ERRORS.md](ERRORS.md).

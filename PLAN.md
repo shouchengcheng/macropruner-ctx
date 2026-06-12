@@ -1,183 +1,212 @@
-# Role & Context
-You are an expert Principal Software Engineer specializing in C/C++ compiler toolchains, AST parsing, and LLM orchestration workflows. You are tasked with developing a high-performance productivity tool named **`MacroPruner-Ctx`**.
+# MacroPruner-Ctx — Architecture & Milestone History
 
-### The Core Pain Point
-In large-scale, multi-firmware C/C++ embedded or Linux systems, a single repository often generates multiple target products. Developers heavily rely on conditional compilation (`#ifdef`, `#ifndef`, `#else`, `#endif`) and preprocessor macros to isolate product-specific code. 
-When feeding code files into LLM prompts for analysis, standard AI tools are "macro-blind"—they inject the entire file, including thousands of lines of inactive, uncompiled code from other products. This leads to massive token waste, contextual noise, and severe LLM hallucinations.
-
-### Project Vision
-`MacroPruner-Ctx` acts as a **"Macro-Aware Context Pruner"** between a complex C/C++ repository and an LLM. It mimics a compiler's preprocessor to strip out inactive code, extract structural skeletons, and generate optimized, highly-concentrated context prompts for LLMs.
+> **One-page architecture overview** for engineers reviewing the codebase or planning extensions. The full operator's manual is in [`docs/usage.md`](docs/usage.md).
 
 ---
 
-# 🏗️ System Architecture & Core Modules
+## What it does, in one paragraph
 
-You must maintain and develop the tool across these four discrete functional modules:
-
-1. **Compile DB Parser (`cc_parser.py`)**
-   - **Input:** Target source file path (e.g., `src/net/lwip_port.c`) and the project's `compile_commands.json`.
-   - **Logic:** Locate the matching file entry. Safely tokenize the `command` or `arguments` array (handling spaces/escapes). Use regex to filter out all global macros defined via `-D` flags (e.g., `-DPRODUCT_TYPE=3`, `-DUSE_LWIP`).
-   - **Output:** A dictionary/list of active macros for that specific file.
-
-2. **Conditional Compilation Pruner (`pruner_core.py`)**
-   - **Input:** Raw source code text, list of active macros.
-   - **Logic:** A robust line-by-line state machine utilizing a stack to handle deeply nested conditional blocks (`#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`).
-   - **Pruning Strategies (Configurable):**
-     - *Physical Deletion:* Drop inactive code blocks entirely to minimize tokens.
-     - *Virtual Folding:* Replace inactive blocks with `/* [Skipped for TARGET_PROD] */` and pad with empty lines to preserve original file line numbers for accurate debugging.
-
-3. **Context Aggregator (`aggregator.py`)**
-   - **Logic:** Reads a local `PROJECT_MANIFEST.md` containing global rules, system architecture, and coding guidelines. Combines the [Global Rules] + [Active Macros Info] + [Pruned Clean Source Code] into a single structured Markdown Prompt.
-   - **Token Guard:** Integrates a token counter. If the aggregate prompt exceeds a set budget (e.g., 10k tokens), triggers secondary pruning (e.g., stripping non-essential comments or enabling skeleton mode).
-
-4. **Interface & Delivery Engine (`cli.py` / `main.py`)**
-   - **CLI Mode:** Command-line tool supporting flags like `macropruner ./main.c --copy` (autocopy pruned text to clipboard).
-   - **LLM Direct Mode:** Optional integration with LLM APIs (e.g., Gemini API) allowing inline queries like: `macropruner ./main.c -q "Explain this timeout logic"`.
+`MacroPruner-Ctx` is an MCP server (with a standalone CLI fallback) that reads C/C++ source files, prunes inactive `#ifdef` branches based on the project's `compile_commands.json`, and hands the LLM a focused view of the active code. It cuts token usage 7%–87% on real embedded projects, depending on the file.
 
 ---
 
-# 🚀 Engineering Roadmap & Multi-File Escalation Strategy
+## Architecture at a glance
 
-To scale this tool for massive codebases, we implement a **Four-Stage Code Reduction Funnel**:
-- **Stage 1 (Macro Pruning):** Drop inactive conditional code (Reduces size by 30-60%).
-- **Stage 2 (Skeletonization):** Strip function bodies `{ ... }` using lightweight AST tokens or regex, keeping only `struct` definitions, `#defines`, and function signatures when full code isn't required.
-- **Stage 3 (Dependency Graphing):** Parse `#include` trees and symbols to pull target files as full-text (pruned) while pulling immediate dependencies as structural skeletons only.
-- **Stage 4 (Token Budgeting):** Rigid cap enforcement prior to LLM dispatch.
-
----
-
-# ✅ Current Project Status
-
-## Milestone 1: Complete (legacy)
-- CompileDBParser, ConditionalPruner, MCP Server, Test Suite — all shipped.
-
-## Milestone 2: P0 Hardening — Complete
-
-### New Module: `expr_eval.py`
-A full-featured C preprocessor expression evaluator. Replaces the original
-hand-rolled `defined()`/bare-macro check with a recursive-descent parser
-covering the patterns real embedded codebases actually use:
-
-| Pattern                              | Status |
-|--------------------------------------|--------|
-| `defined(X)` and `defined X`         | ✅      |
-| `MACRO == N` / `!=` / `<` / `>` / `<=` / `>=` | ✅ |
-| `&&` / `\|\|` / `!` / parens         | ✅      |
-| `MACRO + N` / `* N` / `- N` (arithmetic) | ✅  |
-| Hex literals (`0xFF`)                | ✅      |
-| `IS_ENABLED(CONFIG_X)` (whitelist)   | ✅      |
-| `IS_BUILTIN(CONFIG_X)` (whitelist)   | ✅      |
-| Case-insensitive identifier matching | ✅      |
-| Numeric macro values (`-DARCH=2`)    | ✅      |
-
-Test coverage: **28 cases** (`test_expr_eval.py`).
-
-### New Module: `backends/` — Pluggable Pruner Backends
-
-Two backends are shipped and registered automatically:
-
-| Backend  | Speed  | Output                                | Use case                                 |
-|----------|--------|---------------------------------------|------------------------------------------|
-| `regex`  | Fast   | Original C structure, macros intact   | Default; what LLMs should read           |
-| `clang`  | Slow   | Fully preprocessed (macros expanded)  | Ground-truth oracle / cross-validation   |
-
-Auto mode (`backend='auto'`) picks `clang` if available, else falls back
-to `regex`. Backends are stateless — no global cache, per-call
-instantiation only.
-
-`clang` backend implementation:
-- Locates `clang` (or `clang-14/13/12/11/10`) on PATH
-- Runs `clang -E -w` with `compile_commands.json`'s `-D`/`-I`
-- Walks the line-marker stream to identify the original-file lines
-  that survived preprocessing (= active). Skipped ranges are emitted
-  as `(start, end)` tuples in `PruneResult.skipped_ranges`
-- Skipped/inactive original lines are reconstructed as `(start, end)`
-  ranges for the caller
-
-### Stage 3 Phase 2 — Conditional-Aware Include Traversal
-
-`DependencyGraph` now exposes `conditional_build()` in addition to
-`build()`. The conditional variant:
-
-- Tracks a stack of `#if`-block active/inactive states while walking
-  the file
-- Evaluates every `#if`/`#ifdef`/`#ifndef`/`#elif` with the same
-  `ExpressionEvaluator` the pruner uses
-- Follows an `#include` ONLY if all enclosing `#if` blocks are active
-- Records skipped includes as `header.h [skipped]` in the adjacency
-  list (so callers can see what was considered, even if not followed)
-- Returns `(graph, active_includes_set)` for downstream consumers
-
-`read_c_with_deps` has been upgraded to use `conditional_build()`. When
-you ask for `target=PRODUCT_A` and the file has
-
-```c
-#ifdef PRODUCT_A
-#include "product_a.h"
-#else
-#include "product_b.h"
-#endif
+```
+                    LLM Agent (Hermes, Claude Desktop, ...)
+                                  │
+                                  │  MCP protocol over stdio
+                                  ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│ mcp_server.py — registers the 4 tools                                │
+│                                                                       │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌──────────────────┐      │
+│  │ read_c          │  │ read_c_skeleton   │  │ read_c_with_deps │      │
+│  │ (prune)         │  │ (prune+skeleton)  │  │ (multi-file)     │      │
+│  └────────┬────────┘  └─────────┬────────┘  └─────────┬────────┘      │
+│           │                     │                     │              │
+│  ┌────────▼─────────────────────▼─────────────────────▼──────────┐   │
+│  │                  Pluggable PrunerBackend (ABC)               │   │
+│  │  ┌──────────────────┐  ┌────────────────────────────────┐    │   │
+│  │  │ regex (default)  │  │ clang (ground truth oracle)   │    │   │
+│  │  └────────┬─────────┘  └────────────┬───────────────────┘    │   │
+│  └───────────┼─────────────────────────┼────────────────────────┘   │
+│              │                         │                            │
+│  ┌───────────▼──────────┐    ┌─────────▼──────────────────────┐     │
+│  │ PrunerCore           │    │ ClangBackend                    │     │
+│  │  + ExpressionEval    │    │  - subprocess: clang -E       │     │
+│  │  (recursive-descent  │    │  - compile_db flag inheritance │     │
+│  │   parser, ~400 LOC)  │    │  - line-marker analysis         │     │
+│  │                      │    │  - sysroot / --target support  │     │
+│  └──────────────────────┘    └────────────────────────────────┘     │
+└───────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+                  PruneResult { code, skipped_ranges,
+                                original_code, backend_name,
+                                token_estimate, effective_target,
+                                effective_compile_db, extra metadata }
 ```
 
-…the dependency walker follows only `product_a.h`, not `product_b.h`.
+The three compression stages (callable as different tool names):
 
-### Bug Fixes
-- **elif-chain semantics**: the previous `_handle_elif` / `_handle_else`
-  used a "previous branch was inactive" heuristic, which let `#else`
-  fire incorrectly when an earlier `#if` was active. Replaced with an
-  explicit `taken` flag on `ConditionalBlock`. Verified by
-  `test_pruner_realistic.py`.
-- **`#if` directive not handled**: `process_line` previously only
-  dispatched `#ifdef` / `#ifndef`. Bare `#if` fell through and was
-  emitted as-is. Now routed through `_handle_if` → `evaluate_condition`.
-- **Unbalanced code raises instead of warns**: `prune()` now appends
-  a warning comment for unclosed conditionals (matches the
-  `unbalanced_real_world` test contract).
+1. **Macro prune** (`read_c`) — drop inactive `#if` blocks
+2. **Skeletonize** (`read_c_skeleton`) — strip function bodies, keep signatures
+3. **Dependency graph** (`read_c_with_deps`) — multi-file, conditional-aware (`#include` inside inactive `#if` is NOT followed)
 
-### Total Test Coverage
+You can stack 1+3 but not 2+3 (skeletonizing a target that already has skeletonized dependencies is redundant).
 
-| Module                  | Tests |
-|-------------------------|-------|
-| `pruner_core.py`        | 12    |
-| `expr_eval.py`          | 28    |
-| `skeletonizer.py`       | 9     |
-| `dep_graph.py` (uncond) | 9     |
-| `dep_graph.py` (cond)   | 7     |
-| `backends/`             | 8     |
-| `mcp_server.py` E2E     | 6     |
-| `pruner_realistic.py`   | 10    |
-| **Total**               | **89** |
+---
 
-### MCP API Changes (additive only)
+## Module map
 
-`read_c` and `read_c_with_deps` accept an optional `backend` parameter:
-- `regex` (default)
-- `clang` (ground truth)
-- `auto`
+| Module | Lines | Purpose |
+|---|---|---|
+| `pruner_core.py` | 312 | Stack-based state machine for `#if`/`#ifdef`/`#else`/`#endif`. Holds `ConditionalBlock.taken` flag for elif-chain correctness. Tracks `skipped_ranges` (P2 fix to a long-standing dead-code field). |
+| `expr_eval.py` | 423 | Recursive-descent C preprocessor expression evaluator. `defined()`/`defined X`, `&&`/`\|\|`/`!`, `MACRO == N` / `!=` / `<` / `>` / `<=` / `>=`, arithmetic, hex, `IS_ENABLED()` whitelist, case-insensitive, numeric macro values. Raises `ValueError` on malformed input. |
+| `cc_parser.py` | 209 | Parses `compile_commands.json`. Extracts per-file `-D` macros and `-I` include dirs. Has process-level mtime cache (P1-3). New `get_entry_tokens_for_file()` method (P4-1) hands the full token list to backends. |
+| `skeletonizer.py` | 188 | Strips function bodies, keeps struct/enum/typedef definitions, `#define`/`#include` directives, and function signatures. |
+| `dep_graph.py` | 361 | `#include` tree walker. `build()` is unconditional; `conditional_build()` (P0-6) tracks `#if` active state and skips includes inside inactive blocks. |
+| `token_counter.py` | 123 | LLM token estimator. `char_estimate` (chars/3.7) + `word_estimate` (subword-corrected). |
+| `backends/base.py` | 196 | `PruneResult` dataclass with `token_estimate` property. `PrunerBackend` ABC. `get_backend(name, **kwargs)` factory with auto-registration. |
+| `backends/regex_backend.py` | 78 | Wraps `PrunerCore` + `cc_parser` for the fast pure-Python path. |
+| `backends/clang_backend.py` | 333 | Wraps `clang -E` for ground-truth. `_filter_tokens_for_clang()` (P4-1) sanitizes the project's gcc command. `get_entry_tokens_for_file()` provides the inherit-point. Auto-detects `--target=` and `--sysroot=`; honors user-supplied overrides. |
+| `mcp_server.py` | 519 | MCP server. 4 tools. `_prune_file()` core helper. `_enforce_budget()` (P3-1) for token-budget enforcement. Pass `sysroot`/`extra_target` to clang. |
+| `cli.py` | 240 | Standalone CLI. 3 subcommands (`read`/`skeleton`/`diff`). Reads `.macroprunerrc` from file's directory. |
+| `config.py` | 220 | `.macroprunerrc` parser. KEY=VALUE syntax with `[sections]`. Bare keys implicitly belong to `[pruner]`. `resolve_compile_db()` walks project. |
+| `errors.py` | 100 | `MacroPrunerError` hierarchy. `FatalError` / `TransientError` with formatted() rendering. `format_error()` maps stdlib exceptions to tagged output. `with_fallback()` for per-dep error isolation. |
+| `patch_applier.py` | 320 | Standalone unified-diff applier (no git required). Multi-hunk with cumulative net-change offset tracking. `check_c_syntax()` post-apply validator (brace balance, #if/#endif balance, orphan #else). |
 
-The header banner now includes the active backend name, so callers can
-verify which backend produced the result.
+---
 
-### Next Steps
-- **Stage 4 (Token Budgeting):** Done in P3-1. read_c accepts
-  `token_budget=N`; auto-degrades to skeleton when exceeded;
-  banner tags `[WARN] Over budget: ...` when neither fits.
-- **Cross-validation CLI:** `macropruner diff <file>` — done in
-  P2-3. Compares regex vs clang active-line sets, exits non-zero
-  on disagreement.
-- **Cross-compile SDK support (P4-1):** clang backend now inherits
-  the project's compile_db entry's flags (--target, -march, -mabi
-  etc.) and accepts a user-supplied sysroot. Verified end-to-end
-  against a mock riscv32-linux-musl sysroot in
-  `tests/sysroot_demo`. The regex backend was always cross-SDK
-  ready; the clang backend was previously blocked on riscv-specific
-  gcc optimization flags (-fno-ipa-ra etc.), now handled by a
-  catch-all "-f" drop in `_filter_tokens_for_clang`.
-- **Real SDK integration report:** `integration/ws63_integration_report.md`
-  documents behavior on a real ws63 firmware SDK (HiSilicon
-  riscv32 cross-compile, 30 MB compile_commands.json, 120+ -D
-  macros per .c). Compression 7% - 87% depending on file.
-- **End-to-end demo:** `demo/demo.sh` walks through all 8 major
-  features with pauses for screencast recording. ~10s total.
-- **Editor / LSP integration:** Pre-filter C/C++ buffers before sending
-  to LSP.
+## Data flow (one `read_c` call)
+
+```
+1. Agent invokes read_c(file_path="src/main.c", target="X", compile_db="...").
+2. _prune_file() reads .macroprunerrc (if file_path or compile_db is empty).
+3. get_backend("regex") → RegexBackend().prune()
+4. CompileDBParser(compile_db).extract_macros(file_path)  →  {X: None, ...}
+5. PrunerCore(active_macros, mode=physical).prune(source)
+   - For each line: parse directive OR push to output if active
+   - Track skipped_ranges as (start, end) pairs
+6. PruneResult { code, original_code, skipped_ranges, ... }
+7. _prune_file() optionally enforces token_budget (P3-1):
+   - pruned_tokens > budget → try skeleton
+   - if even skeleton > budget → tag as exceeded
+8. mcp_server.read_c() formats banner + result.code → return string
+9. Banner shows: target, lines dropped, tokens saved, mode, backend,
+   optional [Degraded: skeleton] or [WARN] Over budget line
+```
+
+The whole pipeline: ~0.2s for typical files, ~0.5s for MCP stdio roundtrip.
+
+---
+
+## Cross-cutting concerns
+
+### Configuration
+
+`.macroprunerrc` is the single source of truth for project-level defaults. Search order: `$MACROPRUNER_CONFIG` > `<project>/.macroprunerrc` > `~/.macroprunerrc` > built-in defaults. See [`docs/CONFIG.md`](docs/CONFIG.md).
+
+### Caching
+
+`CompileDBParser` keeps a process-level mtime cache (16 entries, LRU-by-mtime). `clear_cache()` for tests. The MCP server never exposes the cache; it's an internal perf detail.
+
+### Error handling
+
+Every tool wraps its body in a try/except that converts to tagged text:
+- `[FATAL]` — call did not succeed; LLM should retry with different args
+- `[ERROR]` — unexpected internal failure
+- `[WARN]` — call succeeded with caveats (e.g. one dep file unreadable)
+
+Stable string prefixes the LLM (or your test suite) can grep. See [`docs/ERRORS.md`](docs/ERRORS.md).
+
+### Backend selection
+
+Two backends ship in-tree, both auto-registered on import:
+- `regex` (default, fast, pure-Python)
+- `clang` (ground truth, requires `clang` binary on PATH; cross-compile SDKs need a user-supplied `sysroot`)
+
+`auto` mode picks clang when available, regex otherwise. The MCP tool can be told to use either explicitly. See [`docs/BACKENDS.md`](docs/BACKENDS.md).
+
+---
+
+## Extension points
+
+If you want to extend macropruner-ctx, here are the natural hook points:
+
+| Want to ... | Touch |
+|---|---|
+| Add a new `#if` expression operator (e.g. ternary) | `expr_eval.py` — add a token type + a parser method |
+| Add a new backend (e.g. cppfront tree-sitter) | `backends/<name>_backend.py` — implement `PrunerBackend`, decorate with `@register_backend` |
+| Change how the MCP banner looks | `mcp_server.py` `read_c()` — the f-string block in the `try` body |
+| Add a new MCP tool | `mcp_server.py` — `@server.tool(name=..., description=...)` |
+| Change how config keys are typed | `config.py` `_coerce()` |
+| Add a new error severity | `errors.py` — extend the `MacroPrunerError` hierarchy |
+| Add a new CLI subcommand | `cli.py` — `sub.add_parser(...)` + a `_your_subcommand()` function |
+| Tune token-budget degradation | `mcp_server.py` `_enforce_budget()` |
+| Add a clang flag filter | `backends/clang_backend.py` `_CLANG_FLAG_ALLOWLIST_*` constants |
+| Add a new file pattern to auto-discover compile_db | `config.py` `resolve_compile_db()` |
+
+---
+
+## Milestone history
+
+| Milestone | Date | What shipped | Tests |
+|---|---|---|---|
+| **M1 (legacy)** | pre-project | `CompileDBParser`, `PrunerCore`, MCP server with 1 tool (`read_c`) | 12 |
+| **P0 hardening** | this project | Full `#if` expression evaluator (was bare `defined()` only). Pluggable backends (`regex` + `clang`). Conditional `#include` traversal. Bug fixes: elif-chain `taken` flag, bare `#if` dispatch, unbalanced warning. | 12 → 89 |
+| **P1 polish** | this project | Token counter (chars/3.7 estimator). `.macroprunerrc` config (KEY=VALUE, sections, coercion). `compile_commands.json` mtime cache. Full README / usage docs rewrite. | 89 → 122 |
+| **P2 engineering** | this project | Tagged error protocol (`[FATAL]`/`[WARN]`). Standalone unified-diff applier (no git required). Post-apply C syntax check. Standalone CLI with 3 subcommands. `cli.py diff` regex-vs-clang oracle. | 122 → 178 |
+| **P3 hard limits** | this project | Token-budget enforcement with auto-degradation to skeleton. Real-SDK integration test (HiSilicon WS63). End-to-end screencast-ready demo. | 178 → 184 |
+| **P4-1 cross-compile** | this project | `clang` backend now inherits project's `compile_db` flags (--target, -march, -mabi, etc.). Accepts user-supplied `sysroot` for cross-compile SDKs. Verified against mock riscv32-linux-musl sysroot. | 184 → 196 |
+
+Total: **15 test suites / 196+ cases / 5500+ lines of production code**, all passing.
+
+---
+
+## Future work (not started)
+
+- **PyPI publish:** `pip install macropruner-ctx` — package up the current `cli.py`-and-friends for distribution.
+- **CI:** GitHub Actions matrix testing on Python 3.10 / 3.11 / 3.12 + clang available / not available.
+- **Editor / LSP integration:** Pre-filter C/C++ buffers before sending to LSP. Would slot in as a clangd plugin or a vim/zed plugin.
+- **Real C parser for syntax check:** Currently `check_c_syntax()` is brace-counting + ifdef-counting. A pycparser-based check would catch real semantic errors.
+- **clang --target from cdb auto-infer:** Currently the user has to pass `pruner.extra_target` if their cdb doesn't have `--target=`. We could infer `riscv32-*` from `-march=rv32*` automatically.
+- **Streaming response:** For very large `read_c_with_deps` results, stream the response in chunks instead of buffering the full string.
+
+---
+
+## File index (one-line per file)
+
+| File | Purpose |
+|---|---|
+| `pruner_core.py` | `#if` state machine |
+| `expr_eval.py` | `#if` expression evaluator |
+| `cc_parser.py` | `compile_commands.json` parser + cache |
+| `skeletonizer.py` | function-body stripper |
+| `dep_graph.py` | `#include` walker (with conditional variant) |
+| `token_counter.py` | LLM token estimator |
+| `errors.py` | error class hierarchy + tagging |
+| `patch_applier.py` | standalone diff applier + syntax check |
+| `config.py` | `.macroprunerrc` parser |
+| `backends/__init__.py` | re-exports + side-effect imports (register) |
+| `backends/base.py` | `PruneResult`, `PrunerBackend` ABC, factory |
+| `backends/regex_backend.py` | fast pure-Python backend |
+| `backends/clang_backend.py` | ground-truth oracle backend |
+| `mcp_server.py` | MCP server, the 4 tools |
+| `cli.py` | standalone CLI |
+| `test_*.py` (×15) | unit + integration tests |
+| `integration/ws63_smoke.py` | real-SDK smoke runner |
+| `integration/ws63_integration_report.md` | real-SDK validation report |
+| `demo/demo.sh` | 8-step screencast demo |
+| `docs/usage.md` | operator's manual |
+| `docs/CONFIG.md` | `.macroprunerrc` reference |
+| `docs/BACKENDS.md` | backend selection + cross-compile |
+| `docs/ERRORS.md` | error protocol |
+| `docs/ARCHITECTURE.md` | internal architecture (this file) |
+| `docs/CHANGELOG.md` | version history |
+| `demo/README.md` | screencast demo guide |
+| `README.md` | top-level project page |
+| `INTEGRATION.md` | Chinese agent-integration guide |
+| `SETUP.md` | environment setup |
+| `PLAN.md` | this file |

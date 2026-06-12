@@ -6,18 +6,24 @@
 
 MacroPruner-Ctx 是一个 MCP（Model Context Protocol）服务器，让 LLM Agent（Hermes、Claude Desktop 等）在读 C/C++ 源文件时自动剪掉 inactive 的 `#ifdef` / `#ifndef` / `#else` / `#elif` 代码块。
 
-**核心能力：**
+**核心能力**：
 - 完整 `#if` 表达式求值（`#if MACRO == N`、`#if defined(A) && defined(B)`、Linux 风格 `IS_ENABLED`）
-- 两级后端（regex 快 / clang 真值）
+- 两级后端（regex 快 / clang 真值 oracle）
 - 三层压缩（宏剪 → 骨架化 → 依赖图）
 - 配置文件自动读取（`.macroprunerrc`）
 - Token 节省统计
+- Token budget 强制（超出自动降级 skeleton）
+- 跨编译 SDK 支持（clang backend 加 `--sysroot` 跑 HiSilicon ws63、aarch64 等）
+- 错误分级（`[FATAL]` / `[ERROR]` / `[WARN]`）
+- 不依赖 git 的 apply_patch
 
-**4 个 MCP 工具：**
+**4 个 MCP 工具**：
 - `read_c` — 读单文件，剪 inactive 块
 - `read_c_skeleton` — 剪 + 骨架化（剥函数体）
 - `read_c_with_deps` — 多文件上下文（含条件 include 感知）
 - `apply_patch` — 用 unified diff 写回原文件
+
+---
 
 ## 第一步：环境准备
 
@@ -35,9 +41,25 @@ pip install mcp
 
 ```bash
 .venv/bin/python test_pruner.py
+.venv/bin/python test_pruner_realistic.py
+.venv/bin/python test_expr_eval.py
+.venv/bin/python test_skeletonizer.py
+.venv/bin/python test_dep_graph.py
+.venv/bin/python test_conditional_dep_graph.py
+.venv/bin/python test_cc_parser_cache.py
+.venv/bin/python test_config.py
+.venv/bin/python test_errors.py
+.venv/bin/python test_token_budget.py
+.venv/bin/python test_clang_sysroot.py
+.venv/bin/python test_patch_applier.py
+.venv/bin/python test_cli.py
 .venv/bin/python test_backends.py
 .venv/bin/python test_mcp_server.py
 ```
+
+15 个套件应该全部打印 `All tests passed!` 或 `=== N/N passed ===`。
+
+---
 
 ## 第二步：（推荐）写项目配置
 
@@ -60,6 +82,15 @@ default_mode = physical
 
 # read_c_with_deps 的 include 遍历深度（1-5）
 default_max_depth = 3
+
+# ─── 跨编译 SDK 用户（HiSilicon ws63 / aarch64 等）───
+# clang backend 要 oracle 真实预处理结果必须有 sysroot 路径。
+# regex backend 不需要这个。
+pruner.sysroot = /opt/ws63-sdk/sysroot
+pruner.extra_target = riscv32-linux-musl
+
+# 可选：Token budget 强约束
+token_budget = 0       # 0 = 不限制
 ```
 
 之后所有 MCP 调用都可以省略 `target` 和 `compile_db` 参数。
@@ -70,6 +101,10 @@ default_max_depth = 3
 3. `<项目根>/.macroprunerrc`（或 `macroprunerrc`）
 4. `~/.macroprunerrc`
 5. 内置默认值
+
+完整字段参考：`docs/CONFIG.md`。
+
+---
 
 ## 第三步：启动 wrapper
 
@@ -89,6 +124,8 @@ exec "$VENV_PYTHON" "$SCRIPT_DIR/mcp_server.py" "$@"
 ```bash
 chmod +x /path/to/macropruner-ctx/mcp_wrapper.sh
 ```
+
+---
 
 ## 第四步：注册到 Agent
 
@@ -119,6 +156,12 @@ hermes mcp test macropruner
 
 重启 Claude Desktop。四个工具会自动出现在工具列表里。
 
+### 通用 MCP 客户端
+
+任何支持 stdio MCP 的客户端都行。指 `python3 mcp_server.py`（或 wrapper）即可。
+
+---
+
 ## 第五步：使用
 
 ### 最小调用（用 .macroprunerrc 里的默认配置）
@@ -131,7 +174,7 @@ Agent: read_c(file_path="src/main.c")
 
 ```
 /* --- MacroPruner-Ctx ---------------------------- */
-/* Target:    PRODUCT_3                            */
+/* Target:    PRODUCT_3                           */
 /* Lines:     187/420 dropped (44.5%)              */
 /* Tokens:    1230/2870 saved (42.9%)              */
 /* Mode:      physical                             */
@@ -153,12 +196,37 @@ read_c(
 )
 ```
 
+### Token budget 强约束
+
+```
+read_c(
+    file_path="src/big_file.c",
+    token_budget=2000
+)
+```
+
+pruned > 2000 token → 自动降级到 skeleton；连 skeleton 也超 → banner 标 `[WARN] Over budget`。详见 `docs/usage.md § 5.1`。
+
+### 跨编译 SDK 模式
+
+```
+read_c(
+    file_path="src/uart.c",
+    backend="clang",         # 想用 clang oracle
+    sysroot="/opt/ws63-sdk/sysroot",
+    extra_target="riscv32-linux-musl"
+)
+```
+
+或者把这些写进 `.macroprunerrc`，MCP 调用就不用每次都传。
+
+详见 `docs/BACKENDS.md`。
+
 ### 读多文件上下文
 
 ```
 read_c_with_deps(
     file_path="src/wifi.c",
-    target="PRODUCT_3",
     max_depth=3
 )
 ```
@@ -176,6 +244,10 @@ apply_patch(file_path="src/wifi.c", diff="--- a/...")
                                  → 写回
 ```
 
+不需要 git 仓库——内置 applier 直接工作。
+
+---
+
 ## 工具参数详解
 
 ### read_c
@@ -186,21 +258,24 @@ apply_patch(file_path="src/wifi.c", diff="--- a/...")
 | `target` | string | 否 | 目标产品/宏名（缺省用 .macroprunerrc） |
 | `compile_db` | string | 否 | compile_commands.json 路径（缺省用 .macroprunerrc / 自动发现） |
 | `mode` | string | 否 | `"physical"` 彻底删 / `"virtual"` 保留行号 |
-| `backend` | string | 否 | `"regex"`（默认） / `"clang"` / `"auto"` |
+| `backend` | string | 否 | `"regex"`（默认）/`"clang"`/`"auto"` |
+| `token_budget` | int | 否 | 最大 token 数。0 = 无 cap。超出自动降级到 skeleton |
+| `sysroot` | string | 否 | Clang-only：跨编译 SDK 的 sysroot 路径 |
+| `extra_target` | string | 否 | Clang-only：`--target=` 值（如 `riscv32-linux-musl`） |
 
-**`mode` 对比：**
+**`mode` 对比**：
 
 | mode | 行为 | 场景 |
 |------|------|------|
-| `physical` | 删 inactive 块（最省 token） | 常规 LLM 阅读 |
+| `physical` | 删 inactive 块（最省 token） | 常规 LLM 分析 |
 | `virtual` | 替换为 `/* [INACTIVE] */` 注释，保留行号 | 调试、对齐原始行号 |
 
-**`backend` 对比：**
+**`backend` 对比**：
 
 | backend | 输出 | 速度 | 场景 |
 |---------|------|------|------|
 | `regex` | 原始 C 结构，宏保留 | 快 | 默认，LLM 阅读 |
-| `clang` | 完整预处理（宏展开） | 慢 | 交叉验证 oracle |
+| `clang` | 完整预处理（宏展开） | 慢 | 交叉验证 oracle（`sysroot` 必须对） |
 | `auto` | 优先 clang，回退 regex | — | 一次性脚本 |
 
 ### read_c_skeleton
@@ -224,7 +299,13 @@ apply_patch(file_path="src/wifi.c", diff="--- a/...")
 | `file_path` | string | 是 | 要 patch 的 C/C++ 文件 |
 | `diff` | string | 是 | unified diff 字符串 |
 
-要求文件在 git 仓库里（用 `git apply --check` 验证）。非 git 仓库场景请手动 patch。
+**Backend 行为**：
+- 在 git 仓库里 → 优先 `git apply --check` + `git apply`（最可靠）
+- 不在 git → 纯 Python 内置 applier
+- 应用后做 syntax check：括号配平 + #if/#endif 配对
+- 全部通过 → `[OK] ...`；结构异常 → `[OK] ... [WARN] Syntax check found ...`
+
+---
 
 ## 工作原理
 
@@ -238,6 +319,35 @@ apply_patch(file_path="src/wifi.c", diff="--- a/...")
    - PrunerCore 栈式状态机剪 `#ifdef/#endif` 块
    - 返回 PruneResult（code + skipped_ranges + token 节省）
 5. 原始文件不变
+
+完整数据流：`docs/ARCHITECTURE.md`。
+
+---
+
+## 跨编译 SDK 用户场景
+
+HiSilicon WS63、aarch64 这类 cross-compile SDK 用户的额外步骤：
+
+```bash
+# 1. 确认 SDK 装在哪（典型路径）
+ls /opt/ws63-sdk/sysroot/
+
+# 2. 写进 .macroprunerrc
+cat >> .macroprunerrc <<'EOF'
+pruner.sysroot = /opt/ws63-sdk/sysroot
+pruner.extra_target = riscv32-linux-musl
+EOF
+
+# 3. 现在 clang backend 可以 oracle
+hermes mcp test macropruner
+# LLM agent:
+#   read_c(file_path="src/uart.c", backend="clang")
+#   正常返回（之前会 [FATAL] 因为找不到 nv_porting.h 等 SDK 头文件）
+```
+
+详细：`docs/BACKENDS.md`。
+
+---
 
 ## 故障排查
 
@@ -255,6 +365,19 @@ apply_patch(file_path="src/wifi.c", diff="--- a/...")
 - 或在每次调用里显式传 `compile_db` 绝对路径
 - 或把 `compile_commands.json` 放到项目根或 `build/` 子目录
 
+### "no clang binary found on PATH"
+
+```bash
+# Ubuntu / Debian
+sudo apt install clang
+```
+
+或者只用 `backend="regex"` / `backend="auto"`（自动回退 regex）。
+
+### 跨编译 SDK 上 clang 失败
+
+设 `--sysroot`（参考上面"跨编译 SDK 用户场景"）。
+
 ### 剪枝效果不符合预期
 
 - 切到 `mode="virtual"` 看哪些块被标 `[INACTIVE]`
@@ -264,6 +387,20 @@ apply_patch(file_path="src/wifi.c", diff="--- a/...")
 ### 输出 token 数显示很怪
 
 估算基于 `chars / 3.7`，对代码 ±15% 准确，老模型（GPT-3 davinci / claude-1）偏差大。
+
+### apply_patch 报 "context mismatch"
+
+diff 的 `@@ -N,M @@` 偏移已经和当前文件不匹配。重新从当前文件内容生成 diff。
+
+### 错误字符串识别
+
+工具返回字符串以 `[FATAL]` / `[ERROR]` / `[WARN]` 开头，LLM 应当 grep 识别。详见 `docs/ERRORS.md`。
+
+### Token 超额不降级
+
+`token_budget` 必须是正整数。0 关闭。`docs/usage.md § 5.1` 详解。
+
+---
 
 ## 命令速查（Hermes）
 
@@ -287,10 +424,35 @@ hermes mcp configure macropruner
 /reload-mcp
 ```
 
+---
+
+## 不接 MCP 也能用：CLI 模式
+
+```bash
+# 剪一个文件
+.venv/bin/python cli.py read src/main.c --target PRODUCT_3 --cdb build/compile_commands.json
+
+# 骨架化
+.venv/bin/python cli.py skeleton src/main.c --target PRODUCT_3
+
+# diff 模式（regex vs clang oracle）
+.venv/bin/python cli.py diff src/main.c --target PRODUCT_3
+
+# 跨编译 SDK
+.venv/bin/python cli.py read src/uart.c --backend clang \
+    --sysroot /opt/ws63-sdk/sysroot --target-arg riscv32-linux-musl \
+    --cdb output/ws63/acore/ws63-liteos-app/compile_commands.json
+```
+
+完整 CLI 参考：`docs/usage.md § 12`。
+
+---
+
 ## 完整使用手册
 
-[docs/usage.md](docs/usage.md) 里有更详细的操作手册，包括：
-- 完整 `#if` 语法支持表
-- 各种工作流示例（审查 / 对比产品 / 审计 / 批量）
+[docs/usage.md](docs/usage.md) 里有更详细的操作手册：
+- 概念、安装、.macroprunerrc、MCP 集成、4 个工具详解、backend 选择、#if 语法表
+- 4 个工作流示例（审查 / 对比产品 / 审计 / 批量）
 - 性能 / 缓存机制
 - 完整的故障排查
+- reference

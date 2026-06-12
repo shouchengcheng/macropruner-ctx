@@ -2,16 +2,17 @@
 
 ## 系统要求
 
-- Python >= 3.10
+- Python **>= 3.10**（MCP SDK 要求）
 - pip（Python 包管理器）
-- 可选：venv（Python 虚拟环境，推荐使用）
+- 可选：venv（推荐）
+- 可选：`clang`（如果要用 oracle backend；Ubuntu/Debian `apt install clang`，macOS `brew install llvm`）
 
 ## 安装步骤
 
 ### 1. 克隆项目
 
 ```bash
-git clone <repo-url> macropruner-ctx
+git clone https://github.com/shouchengcheng/macropruner-ctx.git
 cd macropruner-ctx
 ```
 
@@ -29,7 +30,7 @@ source .venv/bin/activate  # Linux/macOS
 pip install mcp
 ```
 
-安装后验证版本：
+验证版本：
 
 ```bash
 python3 -c "import mcp; print(mcp.__version__)"
@@ -38,75 +39,29 @@ python3 -c "import mcp; print(mcp.__version__)"
 
 ### 4. 验证安装
 
-运行单元测试：
+跑单元测试套件：
 
 ```bash
-python3 test_pruner.py
+.venv/bin/python test_pruner.py
+.venv/bin/python test_pruner_realistic.py
+.venv/bin/python test_expr_eval.py
+.venv/bin/python test_skeletonizer.py
+.venv/bin/python test_dep_graph.py
+.venv/bin/python test_conditional_dep_graph.py
+.venv/bin/python test_cc_parser_cache.py
+.venv/bin/python test_config.py
+.venv/bin/python test_errors.py
+.venv/bin/python test_token_budget.py
+.venv/bin/python test_clang_sysroot.py
+.venv/bin/python test_patch_applier.py
+.venv/bin/python test_cli.py
+.venv/bin/python test_backends.py
+.venv/bin/python test_mcp_server.py
 ```
 
-预期输出（7 个测试全部通过）：
+所有 15 个套件应该打印 `All tests passed!` 或 `=== N/N passed ===`。
 
-```
-TEST simple_ifdef: PASS
-TEST nested_ifdef_deep: PASS
-TEST ifndef: PASS
-TEST else_toggle: PASS
-TEST elif_chain: PASS
-TEST physical_deletion: PASS
-TEST physical_with_else: PASS
-```
-
-运行 Skeletonizer 测试：
-
-```bash
-python3 test_skeletonizer.py
-```
-
-预期输出（9 个测试全部通过）：
-
-```
-TEST simple_function: PASS
-TEST struct_preserved: PASS
-...
-All skeletonizer tests passed!
-```
-
-运行 DepGraph 测试：
-
-```bash
-python3 test_dep_graph.py
-```
-
-预期输出（9 个测试全部通过）：
-
-```
-TEST build_graph: PASS
-TEST include_resolution: PASS
-...
-TEST resolved_paths: PASS
-All dependency graph tests passed!
-```
-
-运行 E2E 测试：
-
-```bash
-python3 test_mcp_server.py
-```
-
-预期输出（6 个测试全部通过）：
-
-```
-TEST list_tools: PASS
-TEST read_c: PASS
-TEST read_c (virtual mode): PASS
-TEST read_c (with explicit compile_db): PASS
-TEST read_c_with_deps_listed: PASS
-TEST read_c_with_deps: PASS
-
-All MCP server tests passed!
-```
-
-## 快速启动
+### 5. 快速启动 MCP server
 
 ```bash
 source .venv/bin/activate
@@ -125,7 +80,7 @@ MCP SDK 要求 Python >= 3.10。确认当前版本：
 python3 --version
 ```
 
-如果版本低于 3.10，请安装 Python 3.10 或更高版本。
+如果版本低于 3.10，请安装 Python 3.10 或更高版本。Ubuntu 20.04+ 自带 3.10+，macOS Homebrew 也能装。
 
 ### pip install mcp 报网络错误
 
@@ -144,24 +99,86 @@ pip install --upgrade pip
 pip install mcp
 ```
 
+### Linux 上 readline 报错（可选依赖）
+
+MCP stdio 通信用 JSON-RPC 不需要 readline。如果出现 `ImportError: No module named 'readline'`：
+
+```bash
+# Debian / Ubuntu
+sudo apt install libreadline-dev
+# macOS — readline 自带
+# 或者在 venv 装 pyreadline3
+pip install pyreadline3
+```
+
+### macOS `libmagic` 报错
+
+如果 Claude Desktop 集成时碰到 `libmagic` 缺失：
+
+```bash
+brew install libmagic
+```
+
+### Windows 上 `signal` 模块行为
+
+Windows 不支持 `SIGINT` 等 POSIX 信号，MCP 进程在 Windows 上不能干净地 graceful shutdown。这是 MCP SDK 本身的限制，不是工具问题。
+
 ## 项目结构
 
 ```
 macropruner-ctx/
 ├── cc_parser.py          # compile_commands.json 解析器
-├── pruner_core.py        # 核心引擎：栈式状态机处理 #ifdef 嵌套
-├── skeletonizer.py       # Stage 2：函数体剥离，保留声明
-├── dep_graph.py          # Stage 3：#include 依赖图构建器
-├── mcp_server.py         # MCP Server，通过 stdio 暴露 read_c/read_c_skeleton/read_c_with_deps/apply_patch 工具
-├── mcp_wrapper.sh        # Wrapper 脚本（Hermes 等 Agent 使用）
-├── test_pruner.py        # 单元测试（7 个用例）
-├── test_skeletonizer.py  # Skeletonizer 测试（9 个用例）
-├── test_dep_graph.py     # DepGraph 测试（9 个用例）
-├── test_mcp_server.py    # E2E 测试（6 个用例）
+├── pruner_core.py        # 核心引擎：栈式状态机
+├── expr_eval.py          # 完整的 #if 表达式求值器
+├── skeletonizer.py       # Stage 2：函数体剥离
+├── dep_graph.py          # Stage 3：#include 依赖图
+├── token_counter.py      # LLM token 估算器
+├── errors.py             # 错误分级 + 标签格式
+├── patch_applier.py      # 独立 unified diff 应用器
+├── config.py             # .macroprunerrc 解析
+├── backends/             # 可插拔后端
+│   ├── base.py           #   PrunerBackend ABC
+│   ├── regex_backend.py  #   快速 pure-Python
+│   └── clang_backend.py  #   ground-truth oracle
+├── mcp_server.py         # MCP Server (stdio)
+├── mcp_wrapper.sh        # Wrapper 脚本（Hermes 等 Agent 用）
+├── cli.py                # 独立 CLI
+├── test_*.py             # 15 个测试套件
 ├── test_samples/         # 测试样例 C 文件
-├── docs/
-│   └── stage3-evaluation.md  # Stage 3 横向评估报告
-├── PLAN.md               # 架构文档
+├── integration/          # 真实 SDK 集成测试
+│   ├── ws63_smoke.py
+│   ├── ws63_smoke.log
+│   └── ws63_integration_report.md
+├── demo/                 # 端到端 demo
+│   ├── demo.sh
+│   └── README.md
+├── docs/                 # 详细文档
+│   ├── usage.md          #   操作手册
+│   ├── CONFIG.md         #   .macroprunerrc 参考
+│   ├── BACKENDS.md       #   backend 决策 + 跨编译
+│   ├── ERRORS.md         #   错误协议
+│   ├── ARCHITECTURE.md   #   内部架构
+│   ├── CHANGELOG.md      #   版本历史
+│   └── stage3-evaluation.md  #   Stage 3 历史评估
+├── PLAN.md               # 架构 + 里程碑
+├── README.md             # 项目首页
+├── INTEGRATION.md        # 中文集成指南
 ├── SETUP.md              # 本文档
-└── INTEGRATION.md        # Agent 集成指南
+├── 小红书文案.md          # 营销文案
+└── .zhiyu/               # 个人 plan 文件
 ```
+
+## 卸载
+
+```bash
+deactivate        # 退出虚拟环境
+cd .. && rm -rf macropruner-ctx
+```
+
+## 下一步
+
+- 阅读 [README.md](README.md) 了解工具能做什么
+- 阅读 [docs/usage.md](docs/usage.md) 学习详细用法
+- 跟着 [INTEGRATION.md](INTEGRATION.md) 接入你的 Agent
+- 跑 `bash demo/demo.sh` 看 demo
+- 跑 `python3 integration/ws63_smoke.py` 看真实 SDK 表现（如果有 ws63 SDK）

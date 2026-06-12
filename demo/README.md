@@ -1,9 +1,9 @@
 # MacroPruner-Ctx end-to-end demo
 
-A self-contained, scripted demo that walks through the most
-important features of macropruner-ctx in eight steps. Designed
-for screencasts: each step pauses briefly (configurable) so the
-viewer can read the output before the next step scrolls past.
+A self-contained, scripted demo that walks through the most important
+features of macropruner-ctx in eight steps. Designed for screencasts:
+each step pauses briefly (configurable) so the viewer can read the
+output before the next step scrolls past.
 
 ## Quick start
 
@@ -14,14 +14,14 @@ bash demo/demo.sh
 # Faster run, no pauses (good for CI):
 bash demo/demo.sh --no-pause
 
-# Record output to a file:
+# Record output to a file (for screencast logs / commit-able transcripts):
 bash demo/demo.sh --record /tmp/demo_output.log
 ```
 
-The script creates a fresh `mktemp -d` working directory under
-`/tmp` and tears it down on exit, so re-running doesn't pollute
-state. To keep the demo directory around (for inspection), comment
-out the `trap "rm -rf $DEMO_DIR" EXIT` line near the top.
+The script creates a fresh `mktemp -d` working directory under `/tmp`
+and tears it down on exit, so re-running doesn't pollute state. To
+keep the demo directory around (for inspection), comment out the
+`trap "rm -rf $DEMO_DIR" EXIT` line near the top of `demo.sh`.
 
 ## What you'll see
 
@@ -48,23 +48,25 @@ patterns macropruner was built for:
 - `#ifdef DEBUG` blocks
 - Conditional `#include "proto.h"` (exercised in Step 5)
 
-The `.macroprunerrc` it drops says `default_target = PRODUCT_3`,
-so all the MCP calls in subsequent steps get that target without
-the LLM having to pass it explicitly.
+The `.macroprunerrc` it drops says `default_target = PRODUCT_3`, so all
+the MCP calls in subsequent steps get that target without the LLM
+having to pass it explicitly.
 
 ## What this demo is NOT
 
-- **Not a real product.** The sample `.c` is contrived to
-  showcase every feature in one screen. For real-world numbers,
-  see `integration/ws63_integration_report.md`.
+- **Not a real product.** The sample `.c` is contrived to showcase
+  every feature in one screen. For real-world numbers, see
+  `integration/ws63_integration_report.md`.
 - **Not a test suite.** The demo has no assertions; it's purely
-  visual. The actual test suite is in `test_*.py` and verified
-  by `bash /tmp/runall.sh` (or just `for t in test_*.py; do
-  .venv/bin/python $t; done`).
-- **Not a benchmark.** The script uses `head -10` on Step 7 to
-  keep the screen short. The real numbers from the ws63 SDK are
-  in `integration/ws63_integration_report.md` (7% - 87% token
-  savings depending on the file).
+  visual. The actual test suite is in `test_*.py` and verified by
+  `for t in test_*.py; do .venv/bin/python $t; done`.
+- **Not a benchmark.** The script uses `head -10` on Step 7 to keep
+  the screen short. The real numbers from the ws63 SDK are in
+  `integration/ws63_integration_report.md` (7% - 87% token savings
+  depending on the file).
+- **Not a cross-compile SDK demo.** The sample project uses no SDK
+  toolchain. For a real cross-SDK oracle workflow, see
+  `docs/BACKENDS.md` § "Cross-compile SDK oracle workflow".
 
 ## Customizing
 
@@ -79,13 +81,36 @@ The `pause()` function uses `$PAUSE` (default 1.5s).
 Want to demo a different file? Edit the `cat > "$DEMO_DIR/main.c"`
 block in Step 1 and re-run.
 
+Want to demo cross-compile? Set environment variables before running:
+
+```bash
+MACROPRUNER_DEMO_SYSROOT=/opt/ws63-sdk/sysroot \
+MACROPRUNER_DEMO_TARGET=riscv32-linux-musl \
+    bash demo/demo.sh
+```
+
+(The demo doesn't yet wire these through to Step 5; pull request
+welcome if you want to add it.)
+
 ## Embedding in your own product docs
 
 The `--record` flag writes a timestamped log to the path you
-specify. Many teams use the demo's output as the canonical "how
-to use this tool" walkthrough in their internal wiki:
+specify. Many teams use the demo's output as the canonical "how to
+use this tool" walkthrough in their internal wiki:
 
 ```bash
 bash demo/demo.sh --record docs/macropruner_walkthrough.log
 # Then commit docs/macropruner_walkthrough.log alongside docs/.
 ```
+
+## Related demos
+
+- `integration/ws63_smoke.py` — automated smoke test against a real
+  HiSilicon WS63 firmware SDK. Run with:
+  ```bash
+  python3 integration/ws63_smoke.py
+  ```
+  Writes a full report to `integration/ws63_integration_report.md`.
+
+- `/tmp/sysroot_demo.py` — build a mock riscv32-linux-musl sysroot,
+  drive the clang backend through it. Demonstrates P4-1.
