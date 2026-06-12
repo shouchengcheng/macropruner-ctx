@@ -118,7 +118,7 @@ P4-1 fixes this in three ways:
 
 2. **Auto-detecting `--target=` and `--sysroot=`.** If the
    inherited flag list contains `--target=riscv32-linux-musl` or
-   `--sysroot=/opt/sdk/sysroot`, we use those. Otherwise we rely
+   `--sysroot=<cross-sdk-sysroot>`, we use those. Otherwise we rely
    on clang's defaults (which works for native builds, fails for
    cross-compile).
 
@@ -130,23 +130,23 @@ P4-1 fixes this in three ways:
 ### Cross-compile SDK oracle workflow
 
 Suppose you're working with the HiSilicon WS63 SDK at
-`/opt/ws63-sdk/`, with a sysroot at `/opt/ws63-sdk/sysroot/`. You
+`<cross-sdk-install>/`, with a sysroot at `<cross-sdk-sysroot>/`. You
 want the clang oracle to actually work on it.
 
 **Step 1: Find the sysroot**
 
 ```bash
 # ws63 SDK's sysroot is typically:
-ls /opt/ws63-sdk/sysroot/
+ls <cross-sdk-sysroot>/
 
 # The compile_db is at:
-ls /opt/ws63-firmware/output/ws63/acore/ws63-liteos-app/compile_commands.json
+ls <firmware-project>/output/ws63/acore/ws63-liteos-app/compile_commands.json
 ```
 
 **Step 2: Write the config**
 
 ```ini
-# /opt/ws63-firmware/.macroprunerrc
+# <firmware-project>/.macroprunerrc
 default_target    = ws63
 compile_db        = output/ws63/acore/ws63-liteos-app/compile_commands.json
 default_backend   = regex              # regex always works cross-SDK
@@ -154,7 +154,7 @@ default_mode      = physical
 default_max_depth = 3
 
 # For the clang oracle:
-pruner.sysroot      = /opt/ws63-sdk/sysroot
+pruner.sysroot      = <cross-sdk-sysroot>
 pruner.extra_target = riscv32-linux-musl
 ```
 
@@ -165,7 +165,7 @@ pruner.extra_target = riscv32-linux-musl
 .venv/bin/python cli.py read src/uart.c --backend clang
 
 # Or via MCP (LLM agent):
-read_c(file_path="/opt/ws63-firmware/src/uart.c", backend="clang")
+read_c(file_path="<firmware-project>/src/uart.c", backend="clang")
 ```
 
 **Expected behavior:**
@@ -173,7 +173,7 @@ read_c(file_path="/opt/ws63-firmware/src/uart.c", backend="clang")
 ```
 /* --- MacroPruner-Ctx (Clang Backend / Oracle) --- */
 /* Target:    ws63                                  */
-/* Backend:   sysroot=/opt/ws63-sdk/sysroot         */
+/* Backend:   sysroot=<cross-sdk-sysroot>         */
 /* Note: Fully preprocessed by clang -E.             */
 /* Macros expanded, #include'd content inlined.       */
 /* ...                                              */

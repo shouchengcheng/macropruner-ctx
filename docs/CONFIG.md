@@ -15,7 +15,7 @@ compile_db        = build/compile_commands.json
 default_backend   = regex
 
 # Cross-compile SDK users (P4-1)
-pruner.sysroot     = /opt/ws63-sdk/sysroot
+pruner.sysroot     = <cross-sdk-sysroot>
 pruner.extra_target = riscv32-linux-musl
 ```
 
@@ -29,7 +29,7 @@ When the tool needs a value, it searches in this order (first hit wins):
 1. **The MCP call's argument** (highest priority)
    - `read_c(file_path="...", target="X", compile_db="...")`
 2. **Environment variable** `$MACROPRUNER_CONFIG` (absolute path to a custom config file)
-3. **`<project>/.macroprunerrc`** (or `<project>/macroprunerrc`)
+3. **`<project-root>/.macroprunerrc`** (or `<project-root>/macroprunerrc`)
 4. **`~/.macroprunerrc`**
 5. **Built-in defaults** (see "Defaults" below)
 
@@ -109,11 +109,11 @@ useful in `compile_commands.json` `-D` flags).
 
 ### Example 1: Native Linux C project
 
-Project: `/home/me/myapp/`, compile_db at `build/compile_commands.json`,
+Project: `<project-root>/`, compile_db at `build/compile_commands.json`,
 target name `release`.
 
 ```ini
-# /home/me/myapp/.macroprunerrc
+# <project-root>/.macroprunerrc
 default_target = release
 compile_db     = build/compile_commands.json
 default_backend = auto     # clang if installed
@@ -121,28 +121,28 @@ default_backend = auto     # clang if installed
 
 LLM agent calls:
 ```
-read_c(file_path="/home/me/myapp/src/main.c")
+read_c(file_path="<project-root>/src/main.c")
 ```
 
 The tool:
 - Resolves `target` → "release" from config
-- Resolves `compile_db` → `/home/me/myapp/build/compile_commands.json`
+- Resolves `compile_db` → `<project-root>/build/compile_commands.json`
 - Uses the auto backend (clang here, since it ships with Ubuntu)
 
 ### Example 2: Cross-compile SDK project
 
-Project: `/opt/ws63-firmware/`, cross gcc is `riscv32-linux-musl-gcc`,
-sysroot at `/opt/ws63-sdk/sysroot`.
+Project: `<firmware-project>/`, cross gcc is `riscv32-linux-musl-gcc`,
+sysroot at `<cross-sdk-sysroot>`.
 
 ```ini
-# /opt/ws63-firmware/.macroprunerrc
+# <firmware-project>/.macroprunerrc
 default_target     = ws63
 compile_db         = output/ws63/acore/ws63-liteos-app/compile_commands.json
 default_backend    = regex          # regex works for cross-SDK out of the box
 default_max_depth  = 3
 
 # If you also want to use clang for cross-validation:
-pruner.sysroot     = /opt/ws63-sdk/sysroot
+pruner.sysroot     = <cross-sdk-sysroot>
 pruner.extra_target = riscv32-linux-musl
 ```
 
@@ -163,10 +163,10 @@ why the function bodies are missing. See [docs/usage.md § 5.1](usage.md).
 ## `$MACROPRUNER_CONFIG` — point at a non-standard config
 
 If you want to use a config file outside the search path (e.g.
-`/etc/macroprunerrc` for system-wide defaults):
+`<system-config-dir>/macroprunerrc` for system-wide defaults):
 
 ```bash
-export MACROPRUNER_CONFIG=/etc/macroprunerrc
+export MACROPRUNER_CONFIG=<system-config-dir>/macroprunerrc
 hermes mcp test macropruner
 ```
 

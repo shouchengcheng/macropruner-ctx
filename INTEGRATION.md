@@ -86,7 +86,7 @@ default_max_depth = 3
 # ─── 跨编译 SDK 用户（HiSilicon ws63 / aarch64 等）───
 # clang backend 要 oracle 真实预处理结果必须有 sysroot 路径。
 # regex backend 不需要这个。
-pruner.sysroot = /opt/ws63-sdk/sysroot
+pruner.sysroot = <cross-sdk-sysroot>
 pruner.extra_target = riscv32-linux-musl
 
 # 可选：Token budget 强约束
@@ -213,7 +213,7 @@ pruned > 2000 token → 自动降级到 skeleton；连 skeleton 也超 → banne
 read_c(
     file_path="src/uart.c",
     backend="clang",         # 想用 clang oracle
-    sysroot="/opt/ws63-sdk/sysroot",
+    sysroot="<cross-sdk-sysroot>",
     extra_target="riscv32-linux-musl"
 )
 ```
@@ -330,11 +330,11 @@ HiSilicon WS63、aarch64 这类 cross-compile SDK 用户的额外步骤：
 
 ```bash
 # 1. 确认 SDK 装在哪（典型路径）
-ls /opt/ws63-sdk/sysroot/
+ls <cross-sdk-sysroot>/
 
 # 2. 写进 .macroprunerrc
 cat >> .macroprunerrc <<'EOF'
-pruner.sysroot = /opt/ws63-sdk/sysroot
+pruner.sysroot = <cross-sdk-sysroot>
 pruner.extra_target = riscv32-linux-musl
 EOF
 
@@ -440,7 +440,7 @@ hermes mcp configure macropruner
 
 # 跨编译 SDK
 .venv/bin/python cli.py read src/uart.c --backend clang \
-    --sysroot /opt/ws63-sdk/sysroot --target-arg riscv32-linux-musl \
+    --sysroot <cross-sdk-sysroot> --target-arg riscv32-linux-musl \
     --cdb output/ws63/acore/ws63-liteos-app/compile_commands.json
 ```
 

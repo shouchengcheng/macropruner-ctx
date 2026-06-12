@@ -60,7 +60,7 @@ hermes mcp add macropruner --command "/path/to/macropruner-ctx/mcp_wrapper.sh"
 Cross-compile SDK users (riscv32, aarch64, etc.), add this to the same `.macroprunerrc`:
 
 ```ini
-pruner.sysroot      = /opt/ws63-sdk/sysroot
+pruner.sysroot      = <cross-sdk-sysroot>
 pruner.extra_target = riscv32-linux-musl
 ```
 

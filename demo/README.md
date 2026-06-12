@@ -84,7 +84,7 @@ block in Step 1 and re-run.
 Want to demo cross-compile? Set environment variables before running:
 
 ```bash
-MACROPRUNER_DEMO_SYSROOT=/opt/ws63-sdk/sysroot \
+MACROPRUNER_DEMO_SYSROOT=<cross-sdk-sysroot> \
 MACROPRUNER_DEMO_TARGET=riscv32-linux-musl \
     bash demo/demo.sh
 ```

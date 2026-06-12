@@ -160,7 +160,7 @@ include_dirs      = [third_party/inc, vendor/inc]
 # sysroot has no idea where the SDK's headers live, so
 # #include resolution fails on real-world SDKs.
 # Required for riscv32-linux-musl, aarch64-linux-gnu, etc.
-pruner.sysroot = /opt/ws63-sdk/sysroot
+pruner.sysroot = <cross-sdk-sysroot>
 
 # Optional. Override the --target= value clang sees. If the
 # compile_db entry's command already has --target= that wins.
@@ -511,7 +511,7 @@ read_c(file_path="src/main.c", target="X", backend="clang")
 cat > .macroprunerrc <<'EOF'
 default_target = ws63
 compile_db     = build/compile_commands.json
-pruner.sysroot = /opt/ws63-sdk/sysroot
+pruner.sysroot = <cross-sdk-sysroot>
 pruner.extra_target = riscv32-linux-musl
 EOF
 

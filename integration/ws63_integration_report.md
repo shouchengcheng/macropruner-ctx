@@ -10,7 +10,7 @@
 | 项 | 值 |
 |---|---|
 | 工具 | `macropruner` (P0-P2 hardened, 178+ tests passing) |
-| SDK | `/home/scc/workspace/firmwareunstable/ws63_sdk` (HiSilicon WS63 物联网芯片) |
+| SDK | `<ws63-checkout>` (HiSilicon WS63 物联网芯片) |
 | 工具链 | ws63 用 `riscv32-linux-musl-gcc` (cross-compile) |
 | compile_commands.json | `output/ws63/acore/ws63-liteos-app/compile_commands.json` (30.1 MB, 120+ -D flags per .c) |
 | 选文件策略 | well-covered — 优先选 `#if` 用的宏大部分都在 cdb `-D` 列表里的 .c 文件 |
@@ -60,7 +60,7 @@ ws63 SDK 的 build 目录有 3 个 cdb：
 选出的样本是：
 
 ```
-Picked: /home/scc/workspace/firmwareunstable/ws63_sdk/middleware/utils/nv/nv_storage_lib/nv_key.c
+Picked: <ws63-checkout>/middleware/utils/nv/nv_storage_lib/nv_key.c
   898 lines
   27 #if/#ifdef/#ifndef directives
 ```
@@ -75,15 +75,15 @@ Picked: /home/scc/workspace/firmwareunstable/ws63_sdk/middleware/utils/nv/nv_sto
 
 ```bash
 .venv/bin/python cli.py read \
-    /home/scc/workspace/firmwareunstable/ws63_sdk/middleware/utils/nv/nv_storage_lib/nv_key.c \
-    --cdb /home/scc/workspace/firmwareunstable/ws63_sdk/output/ws63/acore/ws63-liteos-app/compile_commands.json
+    <ws63-checkout>/middleware/utils/nv/nv_storage_lib/nv_key.c \
+    --cdb <ws63-checkout>/output/ws63/acore/ws63-liteos-app/compile_commands.json
 ```
 
 实际输出 (banner 部分)：
 
 ```
 /* --- MacroPruner-Ctx (CLI) --------------------- */
-/* File:      /home/scc/.../nv_key.c                */
+/* File:      <user>/<workspace>/.../nv_key.c                */
 /* Target:    DEFAULT                               */
 /* Lines:     184/898 dropped (20.49%)              */
 /* Tokens:    643/8823 saved (7.29%)                */
@@ -116,8 +116,8 @@ Picked: /home/scc/workspace/firmwareunstable/ws63_sdk/middleware/utils/nv/nv_sto
 
 ```bash
 .venv/bin/python cli.py skeleton \
-    /home/scc/.../nv_key.c \
-    --cdb /home/scc/.../compile_commands.json
+    <user>/<workspace>/.../nv_key.c \
+    --cdb <user>/<workspace>/.../compile_commands.json
 ```
 
 实际输出：
@@ -148,16 +148,16 @@ Picked: /home/scc/workspace/firmwareunstable/ws63_sdk/middleware/utils/nv/nv_sto
 
 ```bash
 .venv/bin/python cli.py diff \
-    /home/scc/.../nv_key.c \
-    --cdb /home/scc/.../compile_commands.json
+    <user>/<workspace>/.../nv_key.c \
+    --cdb <user>/<workspace>/.../compile_commands.json
 ```
 
 实际输出 (stderr)：
 
 ```
-[FATAL] RuntimeError: clang -E failed (rc=1) on /home/scc/.../nv_key.c:
-In file included from /home/scc/.../nv_key.c:9:
-In file included from /home/scc/.../nv_key.c:9:
+[FATAL] RuntimeError: clang -E failed (rc=1) on <user>/<workspace>/.../nv_key.c:
+In file included from <user>/<workspace>/.../nv_key.c:9:
+In file included from <user>/<workspace>/.../nv_key.c:9:
   ...
   'nv_porting.h' file not found
 ```
@@ -241,22 +241,22 @@ In file included from /home/scc/.../nv_key.c:9:
 ws63 中选了 include 最多的 `.c`：
 
 ```
-Picked multi-include file: /home/scc/.../hmac_config.c (108 includes)
+Picked multi-include file: <user>/<workspace>/.../hmac_config.c (108 includes)
 ```
 
 命令：
 
 ```bash
 .venv/bin/python cli.py read \
-    /home/scc/.../hmac_config.c \
-    --cdb /home/scc/.../compile_commands.json
+    <user>/<workspace>/.../hmac_config.c \
+    --cdb <user>/<workspace>/.../compile_commands.json
 ```
 
 实际输出 (banner)：
 
 ```
 /* --- MacroPruner-Ctx (CLI) --------------------- */
-/* File:      /home/scc/.../hmac_config.c            */
+/* File:      <user>/<workspace>/.../hmac_config.c            */
 /* Target:    DEFAULT                               */
 /* Lines:     2062/5663 dropped (36.41%)             */
 /* Tokens:    15356/59675 saved (25.73%)             */
@@ -423,7 +423,7 @@ LLM agent prompt 里加：
 复现命令：
 
 ```bash
-cd /home/scc/workspace/ai_test/macropruner-ctx
+cd <macropruner-ctx-repo>
 PYTHONPATH=. .venv/bin/python integration/ws63_smoke.py
 cat integration/ws63_smoke.log
 ```
