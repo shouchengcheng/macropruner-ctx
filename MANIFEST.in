@@ -3,8 +3,12 @@ include LICENSE
 include INTEGRATION.md
 include PLAN.md
 include SETUP.md
+include mcp_wrapper.sh
 include docs/*.md
 include docs/prompts/*.md
+include docs/dev-notes/*.html
 include demo/demo.sh
-include integration/ws63_smoke.py
+include demo/README.md
+include tests/test_*.py
 include .github/workflows/*.yml
+include examples/README.md

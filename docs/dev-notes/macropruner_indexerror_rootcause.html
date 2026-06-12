@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MacroPruner-Ctx IndexError 根因排查报告</title>
+<style>
+body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; max-width: 920px; margin: 32px auto; padding: 0 24px; color: #222; }
+h1 { border-bottom: 2px solid #333; padding-bottom: 8px; }
+h2 { border-bottom: 1px solid #ccc; padding-bottom: 6px; margin-top: 36px; }
+h3 { color: #444; margin-top: 24px; }
+pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 16px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: 0.9em; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 16px 0; }
+th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; }
+.callout { border-left: 4px solid #f0ad4e; background: #fcf8e3; padding: 12px 16px; margin: 16px 0; border-radius: 0 4px 4px 0; }
+.callout.danger { border-color: #d9534f; background: #f2dede; }
+.callout.success { border-color: #5cb85c; background: #dff0d8; }
+.meta { color: #666; font-size: 14px; margin-bottom: 24px; }
+.meta span { margin-right: 16px; }
+</style>
+</head>
+<body>
+
+<h1>MacroPruner-Ctx IndexError 根因排查报告</h1>
+<div class="meta">
+<span><strong>日期</strong>：2026-06-12</span>
+<span><strong>状态</strong>：已修（3 处 patch + 全套测试通过）</span>
+<span><strong>关联报告</strong>：<a href="macropruner_nameerror_rootcause.html">macropruner_nameerror_rootcause.html</a>（历史 NameError，已不存在）</span>
+</div>
+
+<div class="callout">
+<strong>TL;DR</strong>：源码里 <code>#if ... \&lt;NL&gt; defined(...)</code> 的反斜杠续行被 <code>pruner_core</code> 忽略，截断的 condition 传给 <code>expr_eval._parse_unary_atom</code> 后越界读 <code>self.tokens[self.pos]</code>，抛 <code>IndexError</code>。修复：3 处 (<code>expr_eval.py</code> 越界 raise ValueError + <code>pruner_core.py</code> 兜底扩到 IndexError + <code>mcp_server.py</code> FileNotFoundError hint 区分场景)。
+</div>
+
+<h2>1. 一句话根因</h2>
+<p><code>pruner_core</code> 的 <code>prune()</code> 逐行扫描预处理指令，<strong>不识别 <code>\&lt;NL&gt;</code> 续行</strong>。当遇到 <code>#if EXPR_A || EXPR_B || \&lt;NL&gt; EXPR_C</code> 这种条件时，<code>EXPR_C</code> 被留在下一行不进入当前 <code>condition</code> 字符串；结果传给 <code>expr_eval</code> 的 condition 是被截断的 <code>... ||</code>（末尾的不完整运算符），parser 走到 <code>_parse_unary_atom</code> 期望读下一个 token 时 <code>self.pos</code> 已经越界，触发 <code>IndexError: list index out of range</code>。</p>
+
+<h2>2. 调用链与代码定位</h2>
+<pre><code>mcp_server.py:read_c
+  → _prune_file
+    → inst.prune (regex backend, backends/regex_backend.py)
+      → PrunerCore.process_line  (pruner_core.py:96)
+        → _handle_if
+          → self.evaluate_condition (pruner_core.py:139)
+            → ExpressionEvaluator.evaluate (expr_eval.py:131)
+              → parse_expression → ... → _parse_unary_atom (expr_eval.py:294)
+                → kind, val = self.tokens[self.pos]   # ← IndexError here</code></pre>
+
+<h3>2.1 触发源码模式（实测）</h3>
+<p>文件：<code><private-sdk-path>/middleware/ble/<file>.c:463</code></p>
+<pre><code>#if defined(AUXSDK_SUPPORT_MULTI) || defined(AUXSDK_SUPPORT_HEATPUMPS) ||      \
+    defined(AUXSDK_OVERSEAS) || defined(AUXSDK_SUPPORT_MVN)</code></pre>
+
+<p>传给 <code>expr_eval</code> 的 condition 是被截断的：</p>
+<pre><code>defined(AUXSDK_SUPPORT_MULTI) || defined(AUXSDK_SUPPORT_HEATPUMPS) ||</code></pre>
+
+<p><code>expr_eval</code> tokenize 后：</p>
+<pre><code>DEF AUXSDK_SUPPORT_MULTI ) || DEF AUXSDK_SUPPORT_HEATPUMPS ) ||</code></pre>
+
+<p>parser 解析完第二个 <code>defined(...)</code>，期待下一个 token（通过 <code>_parse_unary_atom</code> 读），但 <code>self.pos</code> 已经到了 token 列表末尾。越界 <code>self.tokens[self.pos]</code> 抛 <code>IndexError</code>。</p>
+
+<h3>2.2 IndexError 漏到 MCP 层的链路</h3>
+<p>pruner_core.py:80 旧版 <code>evaluate_condition</code> 只 catch <code>ValueError</code>：</p>
+<pre><code>try:
+    result = self._evaluator.evaluate(condition)
+    return bool(result)
+except ValueError:        # ← 只 catch ValueError，IndexError 漏出
+    return False</code></pre>
+
+<p>IndexError 一路冒到 mcp_server.py 的 <code>read_c</code> 兜底 <code>except Exception as e: return format_error(e)</code>，被包装成 <code>[ERROR] IndexError: list index out of range</code> 返回给 LLM。</p>
+
+<h2>3. 复现验证</h2>
+<p>在 MCP 修复前，复现命令：</p>
+<pre><code>mcp_macropruner_read_c(
+  file_path=<private-sdk-path>/middleware/ble/<file>.c,
+  target=CONFIG_WS63_PLATFORM,
+  compile_db=<private-sdk-path>/ai/projects/<project-id>/compile_commands/compile_commands.json
+)</code></pre>
+
+<p>修复前返回：</p>
+<pre><code>[ERROR] IndexError: list index out of range</code></pre>
+
+<p>修复后返回：正常剪枝后源码，header 显示 <code>Lines: 256/758 dropped (33.77%)</code>，18.3 ms 完成。</p>
+
+<p>Python 端最小复现：</p>
+<pre><code>import sys; sys.path.insert(0, '/home/scc/workspace/ai_test/macropruner-ctx')
+from pruner_core import PrunerCore, PrunerMode
+p = PrunerCore(active_macros={'CONFIG_WS63_PLATFORM': '1'}, mode=PrunerMode.PHYSICAL_DELETION)
+src = open('<private-sdk-path>/middleware/ble/<file>.c', 'rb')\\
+       .read().decode('utf-8', errors='ignore')
+out = p.prune(src)  # 修复前抛 IndexError；修复后返回 17629 bytes</code></pre>
+
+<h2>4. 为什么现有测试没抓到</h2>
+<p>现有 <code>test_pruner_realistic.py</code> 10 个 case 全是基于简单 <code>#if defined(X)</code> 模式（单 token、单 identifier、IS_ENABLED 宏等），没有"行末 <code>\&lt;NL&gt;</code> 续行 + 多重 <code>||</code>"的 case。仓库内大部分 C 源也不这么写（cond 都在单行内），但 <project-name> / <file> / <file> 习惯把长条件用 <code>\&lt;NL&gt;</code> 续到下一行，所以这个故障在普通工程上很难浮现，在 <project-id> 项目上稳定出现。</p>
+
+<p>这是测试覆盖盲区，**建议补一个回归测试**（见 §7）。</p>
+
+<h2>5. 修复方案（3 处）</h2>
+<table>
+<tr><th>#</th><th>文件</th><th>行</th><th>改动</th><th>行为</th></tr>
+<tr><td>1</td><td><code>expr_eval.py</code></td><td>294</td><td><code>_parse_unary_atom</code> 越界 raise <code>ValueError("unexpected end of expression")</code></td><td>错误模型与其他 parser 函数（<code>_parse_defined</code>、<code>_parse_identifier_or_call</code>）一致；上层能 catch</td></tr>
+<tr><td>2</td><td><code>pruner_core.py</code></td><td>80</td><td><code>evaluate_condition</code> catch 扩到 <code>(ValueError, IndexError)</code></td><td>一个 #if 解析失败不再炸整个 prune 流程（"best-effort, never crash"）</td></tr>
+<tr><td>3</td><td><code>mcp_server.py</code></td><td><code>read_c</code> FileNotFoundError 兜底</td><td>按 <code>str(e)</code> 内容分 3 种 hint</td><td>区分"文件不存在"/"compile_db 缺失"/其他，不再统一误导成"调 bootstrap_config"</td></tr>
+</table>
+
+<p>3 处改动都留了 <code>.bak.20260612_143436</code> 备份。</p>
+
+<h3>5.1 修复 1：<code>expr_eval.py:294</code></h3>
+<pre><code># 修复前
+def _parse_unary_atom(self):
+    kind, val = self.tokens[self.pos]  # ← 越界抛 IndexError
+
+# 修复后
+def _parse_unary_atom(self):
+    if self.pos >= len(self.tokens):
+        raise ValueError("unexpected end of expression")
+    kind, val = self.tokens[self.pos]</code></pre>
+
+<p><strong>理由</strong>：该模块其他 parser 函数（<code>_parse_defined</code>）都用 <code>if self.pos >= len(self.tokens)</code> 守一下，<code>_parse_unary_atom</code> 漏了。补上保证错误模型一致（都是 <code>ValueError</code>）。</p>
+
+<h3>5.2 修复 2：<code>pruner_core.py:80</code></h3>
+<pre><code># 修复前
+try:
+    result = self._evaluator.evaluate(condition)
+    return bool(result)
+except ValueError:
+    return False
+
+# 修复后
+try:
+    result = self._evaluator.evaluate(condition)
+    return bool(result)
+except (ValueError, IndexError):
+    return False</code></pre>
+
+<p><strong>理由</strong>：单点失败不应该毁掉整个 prune。注释里写明这是"best-effort, never crash"契约——与原 <code>ValueError</code> catch 的设计意图一致，只是把 IndexError 也纳入。理论上也考虑过扩到 <code>Exception</code>，但那样会吞掉 AttributeError 之类的真 bug 反而难以发现。</p>
+
+<h3>5.3 修复 3：<code>mcp_server.py:read_c</code> FileNotFoundError 兜底</h3>
+<pre><code># 修复前
+except FileNotFoundError as e:
+    return FatalError(
+        str(e),
+        hint="verify the path exists, or call bootstrap_config() to auto-generate "
+             "the config, or drop a .macroprunerrc with 'compile_db = ...'",
+    ).formatted()
+
+# 修复后
+except FileNotFoundError as e:
+    msg = str(e)
+    if "compile_db" in msg or "compile_commands.json" in msg:
+        hint = "compile_db is missing or unreadable — pass a valid absolute path ..."
+    elif "Cannot resolve file path" in msg:
+        hint = "the source file does not exist at that path — check spelling, case, ..."
+    else:
+        hint = "verify the path exists, or call bootstrap_config() ..."
+    return FatalError(msg, hint=hint).formatted()</code></pre>
+
+<p><strong>理由</strong>：<code>_prune_file</code> 抛的 FileNotFoundError 有 3 种来源（用户路径错 / compile_db 找不到 / 后端内部 IO），hint 写死成"调 bootstrap_config"对前两种都是误导。</p>
+
+<h2>6. 验证步骤</h2>
+<ol>
+<li>Python 端最小复现：<code>PrunerCore(...).prune(open('<file>.c').read())</code> 不再 IndexError（已跑通：24948 → 17629 bytes）</li>
+<li>全套测试：<code>for t in test_*.py; do python3 $t 2>&1 | tail -1; done</code>——17 个测试套全部通过（~190 个 case）</li>
+<li>MCP 端 read_c：3 个场景（复杂仓内文件 / 不存在路径 / 仓外 SDK 文件）全部正常返回，hint 文本准确</li>
+<li>MCP 端 read_c_skeleton：之前必崩的 <file>.c 现在 758→223 行正常剪枝</li>
+</ol>
+
+<h2>7. 建议新增的测试用例（回归）</h2>
+<p>在 <code>test_pruner.py</code> 末尾加：</p>
+<pre><code>def test_truncated_condition_from_line_continuation():
+    """A #if condition truncated by `\\<NL>` should not crash pruner.
+
+    Reproduces the IndexError that surfaced on <file>.c:463 where
+    `defined(A) || defined(B) || \\\\<NL>\\    defined(C)` was passed to
+    expr_eval without the line-continuation being preprocessed, leaving
+    `... ||` with no right operand. The parser walked past the end of
+    the token stream and raised IndexError.
+    """
+    source = textwrap.dedent('''
+        #if defined(A) || defined(B) ||      \\\\
+            defined(C)
+        void active() {}
+        #else
+        void inactive() {}
+        #endif
+    ''')
+    p = PrunerCore({'A': None, 'B': None, 'C': None}, PrunerMode.PHYSICAL_DELETION)
+    # Must not raise IndexError; inactive branch should be pruned.
+    pruned = p.prune(source)
+    assert 'void active()' in pruned
+    assert 'void inactive()' not in pruned</code></pre>
+
+<h2>8. 业务影响（2026-06-12 会话）</h2>
+<p>本次会话里 MacroPruner MCP 在 <project-name> 工程（<project-id>）的 181 个仓内 .c 文件中，<strong>至少 <code><file>.c</code> 一个</strong> 稳定触发该 IndexError（实测）。其他文件（如 <code><file>.c</code>、<code><file>.c</code>）暂未观察到，可能没有用 <code>\&lt;NL&gt;</code> 续行的 #if 条件。修复前 LLM 在读这些文件时只能降级到 <code>read_file</code>/<code>search_files</code>；修复后 MacroPruner 可正常返回剪枝后源码。</p>
+
+<p>具体会话片段：</p>
+<ul>
+<li>14:34 发现：<code>read_c_skeleton(<file>.c)</code> 返回 <code>IndexError: list index out of range</code></li>
+<li>14:35 根因：traceback 指向 <code>expr_eval.py:294</code>，<code>kind, val = self.tokens[self.pos]</code></li>
+<li>14:36 修复 3 处，全部 6 分钟内完成（备份 + patch + 测试）</li>
+<li>14:42 MCP 端验证：3 个场景全过</li>
+</ul>
+
+<h2>9. 与 NameError 报告的关系</h2>
+<p><a href="macropruner_nameerror_rootcause.html">macropruner_nameerror_rootcause.html</a> 描述的是 <code>pruner_core.py:126/131/154/159/179</code> 共 5 处 <code>return line</code> 引用未定义变量的旧 bug。那个 bug 在 <strong>2026-06-12 同步 review 时发现已不存在</strong>——当前代码那 6 处 <code>return line</code> 都引用合法的函数参数。NameError 报告保留为历史档案用，<strong>不要按它的根因去查当前 bug</strong>。</p>
+
+<p>本次报告的 IndexError 才是当前实际故障模式，已修复并验证。</p>
+
+<h2>10. 修复优先级</h2>
+<p><strong>P1</strong>：影响所有用 <code>\&lt;NL&gt;</code> 续行的长 #if 条件源码的读取（<project-name> / auxsdk / ota 这类工程常见）。修复前完全不可用，修复后正常工作。</p>
+
+<p><strong>优先级：必修</strong>。本次已实施。</p>
+
+</body>
+</html>

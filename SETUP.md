@@ -143,12 +143,9 @@ macropruner-ctx/
 ├── mcp_server.py         # MCP Server (stdio)
 ├── mcp_wrapper.sh        # Wrapper 脚本（Hermes 等 Agent 用）
 ├── cli.py                # 独立 CLI
-├── test_*.py             # 15 个测试套件
+├── tests/                # 18 个测试套件
 ├── test_samples/         # 测试样例 C 文件
-├── integration/          # 真实 SDK 集成测试
-│   ├── ws63_smoke.py
-│   ├── ws63_smoke.log
-│   └── ws63_integration_report.md
+├── examples/             # 真实 SDK 集成模板（drop-in）
 ├── demo/                 # 端到端 demo
 │   ├── demo.sh
 │   └── README.md
@@ -159,13 +156,19 @@ macropruner-ctx/
 │   ├── ERRORS.md         #   错误协议
 │   ├── ARCHITECTURE.md   #   内部架构
 │   ├── CHANGELOG.md      #   版本历史
-│   └── stage3-evaluation.md  #   Stage 3 历史评估
+│   ├── ci-integration.md #   CI 集成说明
+│   ├── publishing.md     #   发布到 PyPI
+│   ├── stage3-evaluation.md  #   Stage 3 历史评估
+│   ├── prompts/          #   init-project 集成的 prompts
+│   └── dev-notes/        #   内部 debug 报告（不直接面向终端用户）
 ├── PLAN.md               # 架构 + 里程碑
 ├── README.md             # 项目首页
+├── README_zh.md          # 项目首页（中文）
 ├── INTEGRATION.md        # 中文集成指南
 ├── SETUP.md              # 本文档
-├── 小红书文案.md          # 营销文案
-└── .zhiyu/               # 个人 plan 文件
+├── examples/             # 真实 SDK 集成模板
+├── .github/workflows/    # CI 配置
+└── .gitignore
 ```
 
 ## 卸载
@@ -181,4 +184,3 @@ cd .. && rm -rf macropruner-ctx
 - 阅读 [docs/usage.md](docs/usage.md) 学习详细用法
 - 跟着 [INTEGRATION.md](INTEGRATION.md) 接入你的 Agent
 - 跑 `bash demo/demo.sh` 看 demo
-- 跑 `python3 integration/ws63_smoke.py` 看真实 SDK 表现（如果有 ws63 SDK）

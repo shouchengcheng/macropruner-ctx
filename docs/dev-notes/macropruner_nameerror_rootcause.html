@@ -134,7 +134,7 @@ Case E: #if 0 / 不平衡 #endif + 孤立 #else → REPRODUCED: NameError: name 
 <li>嵌套深度失衡（<code>#if A</code> → <code>#else</code> → <code>#if B</code> → 缺少 <code>#endif B</code> 直接 <code>#endif A</code>）</li>
 </ul>
 
-<p>固件 SDK（尤其 ws63、RTL8720）大量使用 <code>#if 0</code> 块、跨文件 <code>#ifdef</code> 嵌套、和 release/debug 切换宏，<strong>几乎必然会在某些真实文件上触发孤立 <code>#endif</code></strong>。wm_fota.c 就是其中之一（31885 字节，含 <code>#if 0</code> 块、嵌套 <code>#ifdef</code>，本会话就被它卡住）。</p>
+<p>固件 SDK（尤其 ws63、RTL8720）大量使用 <code>#if 0</code> 块、跨文件 <code>#ifdef</code> 嵌套、和 release/debug 切换宏，<strong>几乎必然会在某些真实文件上触发孤立 <code>#endif</code></strong>。<file>.c 就是其中之一（31885 字节，含 <code>#if 0</code> 块、嵌套 <code>#ifdef</code>，本会话就被它卡住）。</p>
 
 <h2>5. 修复方案</h2>
 
@@ -258,15 +258,15 @@ kept
 <h2>8. 业务影响（2026-06-11 会话）</h2>
 
 <div class="info">
-<strong>本会话（ws63-radar 项目）受 MacroPruner MCP 故障影响，已用 grep + read_file 降级完成以下工作：</strong>
+<strong>本会话（<project-id> 项目）受 MacroPruner MCP 故障影响，已用 grep + read_file 降级完成以下工作：</strong>
 <ul>
 <li>0x80003051 错误码定位（<code>ERRCODE_UPG_NO_ENOUGH_SPACE</code>，<code>errcode.h:409</code>）</li>
-<li>ota_progress.percent 累加问题根因（<code>wm_ota_ctx.offset</code> 在 <code>wm_fota_progress_reset()</code> 中未重置）</li>
+<li>ota_progress.percent 累加问题根因（<code><var></code> 在 <code><func>()</code> 中未重置）</li>
 </ul>
-<strong>结论可信度</strong>：grep 不能按 <code>#ifdef</code> 剪枝，所以<strong>有可能漏掉</strong>：wm_fota.c line 333-399（限制 99% 之后的逻辑）、line 490-939（stop / 其它入口 / 工具函数）三段未精读。如果用 MCP <code>read_c</code> 能看完整文件，应补一轮验证。
+<strong>结论可信度</strong>：grep 不能按 <code>#ifdef</code> 剪枝，所以<strong>有可能漏掉</strong>：<file>.c line 333-399（限制 99% 之后的逻辑）、line 490-939（stop / 其它入口 / 工具函数）三段未精读。如果用 MCP <code>read_c</code> 能看完整文件，应补一轮验证。
 </div>
 
-<p><strong>其他可能受影响场景</strong>：所有依赖 MacroPruner MCP 工具的会话（任何使用 init-project skill + ws63/bk7231/8720 项目的会话）都可能在读 wm_fota.c、dna_wlan.c、dna_os.c 这类含 <code>#if 0</code> / 跨文件 <code>#ifdef</code> 嵌套的真实固件源码时撞上同一 NameError。</p>
+<p><strong>其他可能受影响场景</strong>：所有依赖 MacroPruner MCP 工具的会话（任何使用 init-project skill + ws63/<other-sdk>/8720 项目的会话）都可能在读 <file>.c、<file>.c、<file>.c 这类含 <code>#if 0</code> / 跨文件 <code>#ifdef</code> 嵌套的真实固件源码时撞上同一 NameError。</p>
 
 <h2>9. 修复优先级</h2>
 
@@ -278,7 +278,7 @@ kept
 <tr><td>P0</td><td>方案 A 修 5 处 <code>return line</code> + 4 处方法签名 + 4 处调用方</td><td>立即（影响所有 MCP 调用）</td></tr>
 <tr><td>P1</td><td>补 §7 的 5 个测试用例</td><td>随 P0 一起</td></tr>
 <tr><td>P1</td><td>重启 MCP server 验证（<code>mcp_wrapper.sh</code> 状态 / stdio 连接）</td><td>修完后</td></tr>
-<tr><td>P2</td><td>用 <code>read_c</code> 重读 wm_fota.c，补完本会话 line 333-399 / 490-939 的盲区</td><td>修完后</td></tr>
+<tr><td>P2</td><td>用 <code>read_c</code> 重读 <file>.c，补完本会话 line 333-399 / 490-939 的盲区</td><td>修完后</td></tr>
 <tr><td>P2</td><td>在 init-project skill 文档加一条"MacroPruner MCP 故障时的 grep 降级 SOP"</td><td>本会话外</td></tr>
 </tbody>
 </table>

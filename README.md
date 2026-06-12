@@ -144,7 +144,7 @@ For deeper details see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Real-world numbers
 
-End-to-end test against a real HiSilicon WS63 firmware SDK (riscv32-linux-musl cross-compile, 30 MB `compile_commands.json`, 120+ `-D` macros per file):
+End-to-end test against a real cross-compile firmware SDK (riscv32-linux-musl, 30 MB `compile_commands.json`, 120+ `-D` macros per file):
 
 | Scenario | Line reduction | Token savings | Time |
 |---|---|---|---|
@@ -155,7 +155,7 @@ End-to-end test against a real HiSilicon WS63 firmware SDK (riscv32-linux-musl c
 | MCP stdio roundtrip per call (Hermes / Claude Desktop) | — | — | ~0.5s |
 | clang backend with cross-compile SDK + sysroot | n/a | n/a | 0.5s |
 
-Full report: [integration/ws63_integration_report.md](integration/ws63_integration_report.md).
+Full report and a generic SDK integration template: [examples/README.md](examples/README.md).
 
 **Token savings range is 7% – 87%** depending on the file. The low end is a well-covered middleware file where most `#if` blocks are active; the high end is a driver file where most `#if` blocks are inactive.
 
@@ -190,7 +190,7 @@ Decision tree and trade-offs: [docs/BACKENDS.md](docs/BACKENDS.md).
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Version history (P0-P4). |
 | [PLAN.md](PLAN.md) | High-level architecture + milestone history. |
 | [demo/README.md](demo/README.md) | Screencast-ready walkthrough (`bash demo/demo.sh`). |
-| [integration/ws63_integration_report.md](integration/ws63_integration_report.md) | Real SDK validation report. |
+| [examples/README.md](examples/README.md) | Real-SDK integration template (drop in your own SDK + .macroprunerrc). |
 
 ---
 

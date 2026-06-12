@@ -1,11 +1,26 @@
 .venv/
 __pycache__/
 .ruff_cache/
-compile_commands.json
-*.pyc
-*.pyo
 .cache/
 .zhiyu/
 dist/
 build/
 *.egg-info/
+
+# Editor / OS junk
+*.pyc
+*.pyo
+.DS_Store
+
+# Local compile DBs (project-level, not part of macropruner-ctx itself)
+compile_commands.json
+
+# Backup files (mtime-suffixed) — never commit
+*.bak.*
+*~
+*.swp
+
+# Test artifacts (stress-test logs from real SDK runs)
+*.smoke.log
+*.smoke-test.log
+*.test.log

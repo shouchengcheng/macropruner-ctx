@@ -136,11 +136,11 @@ want the clang oracle to actually work on it.
 **Step 1: Find the sysroot**
 
 ```bash
-# ws63 SDK's sysroot is typically:
+# Cross-compile SDK sysroot is typically at:
 ls <cross-sdk-sysroot>/
 
-# The compile_db is at:
-ls <firmware-project>/output/ws63/acore/ws63-liteos-app/compile_commands.json
+# The compile_db is at (example layout for a multi-app SDK):
+ls <firmware-project>/output/<product>/<app>/compile_commands.json
 ```
 
 **Step 2: Write the config**
@@ -148,7 +148,7 @@ ls <firmware-project>/output/ws63/acore/ws63-liteos-app/compile_commands.json
 ```ini
 # <firmware-project>/.macroprunerrc
 default_target    = ws63
-compile_db        = output/ws63/acore/ws63-liteos-app/compile_commands.json
+compile_db        = <path-to-sdk>/output/<product>/<app>/compile_commands.json
 default_backend   = regex              # regex always works cross-SDK
 default_mode      = physical
 default_max_depth = 3
@@ -199,7 +199,7 @@ to compile for. The `pruner.extra_target` field in
 `.macroprunerrc` is the right way to set this for the project.
 
 ```ini
-# .macroprunerrc for ws63
+# .macroprunerrc (riscv32 cross-compile SDK)
 pruner.extra_target = riscv32-linux-musl
 ```
 

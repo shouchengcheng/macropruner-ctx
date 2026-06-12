@@ -158,7 +158,7 @@ If you want to extend macropruner-ctx, here are the natural hook points:
 | **P0 hardening** | this project | Full `#if` expression evaluator (was bare `defined()` only). Pluggable backends (`regex` + `clang`). Conditional `#include` traversal. Bug fixes: elif-chain `taken` flag, bare `#if` dispatch, unbalanced warning. | 12 → 89 |
 | **P1 polish** | this project | Token counter (chars/3.7 estimator). `.macroprunerrc` config (KEY=VALUE, sections, coercion). `compile_commands.json` mtime cache. Full README / usage docs rewrite. | 89 → 122 |
 | **P2 engineering** | this project | Tagged error protocol (`[FATAL]`/`[WARN]`). Standalone unified-diff applier (no git required). Post-apply C syntax check. Standalone CLI with 3 subcommands. `cli.py diff` regex-vs-clang oracle. | 122 → 178 |
-| **P3 hard limits** | this project | Token-budget enforcement with auto-degradation to skeleton. Real-SDK integration test (HiSilicon WS63). End-to-end screencast-ready demo. | 178 → 184 |
+| **P3 hard limits** | this project | Token-budget enforcement with auto-degradation to skeleton. End-to-end screencast-ready demo. | 178 → 184 |
 | **P4-1 cross-compile** | this project | `clang` backend now inherits project's `compile_db` flags (--target, -march, -mabi, etc.). Accepts user-supplied `sysroot` for cross-compile SDKs. Verified against mock riscv32-linux-musl sysroot. | 184 → 196 |
 
 Total: **15 test suites / 196+ cases / 5500+ lines of production code**, all passing.
@@ -195,10 +195,9 @@ Total: **15 test suites / 196+ cases / 5500+ lines of production code**, all pas
 | `backends/clang_backend.py` | ground-truth oracle backend |
 | `mcp_server.py` | MCP server, the 4 tools |
 | `cli.py` | standalone CLI |
-| `test_*.py` (×15) | unit + integration tests |
-| `integration/ws63_smoke.py` | real-SDK smoke runner |
-| `integration/ws63_integration_report.md` | real-SDK validation report |
-| `demo/demo.sh` | 8-step screencast demo |
+| `tests/test_*.py` (×18) | unit + integration tests |
+| `examples/README.md` | real-SDK integration template (drop-in) |
+| `INTEGRATION.md` | Chinese agent-integration guide |
 | `docs/usage.md` | operator's manual |
 | `docs/CONFIG.md` | `.macroprunerrc` reference |
 | `docs/BACKENDS.md` | backend selection + cross-compile |

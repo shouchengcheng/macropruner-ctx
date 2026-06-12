@@ -79,7 +79,7 @@ read_c(file_path="src/main.c")  # 自动从配置读取 target 和 compile_db
 
 ## 实测数据
 
-在真实 HiSilicon WS63 固件 SDK（riscv32 交叉编译，120+ 宏/文件）上的表现：
+在真实 cross-compile 固件 SDK（riscv32 交叉编译，120+ 宏/文件）上的表现：
 
 | 场景 | 行数减少 | Token 节省 | 耗时 |
 |------|---------|-----------|------|

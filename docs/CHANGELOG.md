@@ -73,12 +73,23 @@ needed to deliver real value to embedded engineering teams.
   flow, module dependency graph, PruneResult lifecycle, preprocessor
   engine, backend implementations, caching, configuration, patch
   layer, MCP integration, extension points, timing breakdown.
-- **`integration/ws63_smoke.py`** — automated smoke test against a
-  real HiSilicon WS63 firmware SDK.
-- **`integration/ws63_integration_report.md`** — 429-line process
-  document for the ws63 SDK integration. Real numbers (7% - 87%
-  token savings), discovered limits (clang backend cross-compile
-  before P4-1), recommendations.
+- **`docs/ci-integration.md`** — how to wire macropruner-ctx into CI
+  (per-PR smoke checks, opt-in workflows, security considerations
+  around `apply_patch`).
+- **`docs/publishing.md`** — PyPI release checklist (build, tag,
+  twine, signing).
+- **`docs/stage3-evaluation.md`** — historical evaluation of the
+  Stage 3 conditional-include walker against synthetic + real
+  workloads.
+- **`docs/prompts/`** — ready-to-use init-project prompts for
+  LLM-driven on-boarding (`bootstrap_config` flow).
+- **`docs/dev-notes/`** — internal root-cause analysis reports from
+  specific bug investigations. Not part of the public-facing docs
+  map; useful for maintainers when revisiting related issues.
+- **`examples/README.md`** — drop-in template for running
+  macropruner-ctx against a real cross-compile SDK. Includes the
+  `.macroprunerrc` shape, `compile_db` discovery hints, and the
+  `clang -E` sysroot flag pattern for riscv32 / aarch64 SDKs.
 - **`demo/demo.sh`** — 8-step end-to-end demo for screencasts.
 
 ### Changed

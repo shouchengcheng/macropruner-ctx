@@ -78,7 +78,7 @@ LLM:  哦，有个 bootstrap_config。先调一下看推荐什么。
 LLM:  bootstrap_config()
       → 看到推荐：
         default_target = PRODUCT_3
-        compile_db = ai/projects/ws63-app/compile_commands/cdb.json
+        compile_db = ai/projects/<your-project>/compile_commands/cdb.json
         path_allowlist = [<project-root>]
       → 自动写：
         bootstrap_config(apply=True)
@@ -518,7 +518,7 @@ hermes mcp configure macropruner
 # 跨编译 SDK
 .venv/bin/python cli.py read src/uart.c --backend clang \
     --sysroot <cross-sdk-sysroot> --target-arg riscv32-linux-musl \
-    --cdb output/ws63/acore/ws63-liteos-app/compile_commands.json
+    --cdb <path-to-sdk>/output/<product>/<app>/compile_commands.json
 ```
 
 完整 CLI 参考：`docs/usage.md § 12`。

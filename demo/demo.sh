@@ -329,4 +329,4 @@ echo "  2. Add macropruner to your agent (hermes mcp add macropruner ...)"
 echo "  3. Agent prompt: 'When read_c returns [FATAL], adjust args and retry.'"
 echo
 echo "Docs: README.md, docs/usage.md, INTEGRATION.md"
-echo "Real SDK integration: integration/ws63_integration_report.md"
+echo "Real-SDK template: examples/README.md"

@@ -119,5 +119,7 @@ pipeline {
 - `.github/workflows/tests.yml` — runs the unit test suite
 - `.github/workflows/example-pr-check.yml` — opt-in smoke test
 - `demo/demo.sh` — manual screencast-ready demo
-- `integration/ws63_smoke.py` — the script that the smoke runs
+- `integration/ws63_smoke.py` — the legacy real-SDK smoke script
+  (removed in the open-source reorg; the template in
+  [`examples/README.md`](../examples/README.md) replaces it)
 - `docs/usage.md` — full operator's manual

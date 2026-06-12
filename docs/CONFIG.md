@@ -136,8 +136,8 @@ sysroot at `<cross-sdk-sysroot>`.
 
 ```ini
 # <firmware-project>/.macroprunerrc
-default_target     = ws63
-compile_db         = output/ws63/acore/ws63-liteos-app/compile_commands.json
+default_target     = ws63        # 或 PRODUCT_3 / CHIP_WS63 之类，按你 SDK 的 -D 宏
+compile_db         = <path-to-sdk>/output/<product>/<app>/compile_commands.json
 default_backend    = regex          # regex works for cross-SDK out of the box
 default_max_depth  = 3
 

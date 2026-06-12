@@ -55,15 +55,17 @@ having to pass it explicitly.
 ## What this demo is NOT
 
 - **Not a real product.** The sample `.c` is contrived to showcase
-  every feature in one screen. For real-world numbers, see
-  `integration/ws63_integration_report.md`.
+  every feature in one screen. For real-world numbers on a cross-
+  compile SDK, see [`examples/README.md`](../examples/README.md)
+  and `docs/BACKENDS.md` § "Cross-compile SDK oracle workflow".
 - **Not a test suite.** The demo has no assertions; it's purely
-  visual. The actual test suite is in `test_*.py` and verified by
-  `for t in test_*.py; do .venv/bin/python $t; done`.
+  visual. The actual test suite is in `tests/test_*.py` and verified
+  by the CI workflow (`.github/workflows/tests.yml`).
 - **Not a benchmark.** The script uses `head -10` on Step 7 to keep
-  the screen short. The real numbers from the ws63 SDK are in
-  `integration/ws63_integration_report.md` (7% - 87% token savings
-  depending on the file).
+  the screen short. Real cross-compile SDK numbers (7% - 87% token
+  savings depending on the file) are documented in
+  `docs/BACKENDS.md` and the integration template at
+  [`examples/README.md`](../examples/README.md).
 - **Not a cross-compile SDK demo.** The sample project uses no SDK
   toolchain. For a real cross-SDK oracle workflow, see
   `docs/BACKENDS.md` § "Cross-compile SDK oracle workflow".
@@ -105,12 +107,11 @@ bash demo/demo.sh --record docs/macropruner_walkthrough.log
 
 ## Related demos
 
-- `integration/ws63_smoke.py` — automated smoke test against a real
-  HiSilicon WS63 firmware SDK. Run with:
-  ```bash
-  python3 integration/ws63_smoke.py
-  ```
-  Writes a full report to `integration/ws63_integration_report.md`.
+- [`examples/README.md`](../examples/README.md) — drop-in template
+  for running macropruner-ctx against a real cross-compile SDK
+  (HiSilicon WS63, aarch64, in-house firmware SDKs, etc.). Includes
+  `.macroprunerrc` shape, file-picking heuristic, and the
+  `clang -E` sysroot flag pattern for riscv32 / aarch64.
 
 - `/tmp/sysroot_demo.py` — build a mock riscv32-linux-musl sysroot,
   drive the clang backend through it. Demonstrates P4-1.
