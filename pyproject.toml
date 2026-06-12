@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macropruner-ctx"
+version = "0.5.0"
+description = "Macro-aware C/C++ code pruner for LLM agents. Strips inactive #ifdef branches before code reaches the LLM context."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "MacroPruner-Ctx Contributors"},
+]
+keywords = [
+    "llm",
+    "context",
+    "pruning",
+    "mcp",
+    "preprocessor",
+    "c",
+    "cpp",
+    "embedded",
+    "firmware",
+    "ifdef",
+    "clang",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Pre-processors",
+    "Topic :: Software Development :: Embedded Systems",
+]
+dependencies = [
+    "mcp>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/shouchengcheng/macropruner-ctx"
+Documentation = "https://github.com/shouchengcheng/macropruner-ctx/blob/main/docs/usage.md"
+Source = "https://github.com/shouchengcheng/macropruner-ctx"
+Issues = "https://github.com/shouchengcheng/macropruner-ctx/issues"
+
+[project.scripts]
+# After `pip install macropruner-ctx`, the user can run `macropruner` from
+# any directory — same as invoking `python3 cli.py <subcommand> ...`.
+macropruner = "cli:main"
+
+[tool.setuptools]
+# The package source IS the repo root (no nested `src/` layout).
+py-modules = [
+    "cli",
+    "mcp_server",
+    "pruner_core",
+    "expr_eval",
+    "cc_parser",
+    "skeletonizer",
+    "dep_graph",
+    "token_counter",
+    "errors",
+    "patch_applier",
+    "config",
+]
+packages = [
+    "backends",
+]
+
+[tool.setuptools.package-data]
+# Nothing needs to be packaged as data for now; the docs live
+# in /docs and the user is expected to read them on the GitHub
+# repo. We keep this section here as a placeholder for future
+# non-Python resources (e.g. a .macroprunerrc template).
+"*" = []

@@ -41,6 +41,15 @@ DEFAULTS: Dict[str, Any] = {
     # Cross-compile SDK support for the clang backend (P4-1).
     "pruner.sysroot": "",               # path to a cross-compile SDK's sysroot
     "pruner.extra_target": "",          # e.g. 'riscv32-linux-musl'
+    # Path safety: paths the pruner is allowed to read/write.
+    # Empty list = no restriction (legacy behaviour). When set,
+    # every file_path the LLM passes must resolve under one of
+    # these roots, or the call is refused with [FATAL].
+    "pruner.path_allowlist": [],
+    # Path denylist: paths the pruner is NEVER allowed to touch,
+    # even if they're under an allowlisted root. Useful for blocking
+    # .git/, build/, node_modules/, etc.
+    "pruner.path_denylist": [".git", "node_modules", ".venv"],
 }
 
 

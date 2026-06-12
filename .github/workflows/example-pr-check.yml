@@ -1,0 +1,103 @@
+# Example PR smoke check — opt-in workflow
+#
+# Drop this into your fork's .github/workflows/ if you want the
+# macropruner smoke to run on PRs. The unit-test workflow
+# (tests.yml) already runs on every PR automatically; this one
+# is opt-in because the smoke test needs a real .c file and a
+# compile_commands.json to act on, which not every fork has.
+#
+# Triggers: workflow_dispatch (manual), or any PR labeled
+# 'macropruner-smoke' (add the label in the GitHub UI).
+name: macropruner smoke check
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+  # Run on push to main as well, so the main branch's smoke status
+  # is always current.
+  push:
+    branches: [main, master]
+
+# Only run if the PR has the 'macropruner-smoke' label OR this is
+# a push to main. Avoids burning CI minutes on every PR.
+jobs:
+  smoke:
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'macropruner-smoke')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up venv
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install mcp
+
+      - name: Find a .c file to act on
+        id: find-file
+        run: |
+          set -e
+          # Prefer src/main.c, then any src/*.c, then anything.
+          FILE=$(ls -1 src/main.c 2>/dev/null \
+                 || ls -1 src/*.c 2>/dev/null | head -1 \
+                 || find . -name '*.c' -not -path '*/.venv/*' -not -path '*/node_modules/*' | head -1)
+          if [ -z "$FILE" ]; then
+            echo "No .c file found in the repo; macropruner smoke skipped"
+            echo "::warning::macropruner smoke needs a .c file to run"
+            exit 0
+          fi
+          echo "FILE=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Will run macropruner on: $FILE"
+
+      - name: Find compile_commands.json
+        id: find-cdb
+        run: |
+          set -e
+          CDB=$(ls -1 build/compile_commands.json 2>/dev/null \
+                || ls -1 compile_commands.json 2>/dev/null \
+                || find . -name 'compile_commands.json' -not -path '*/.venv/*' | head -1)
+          if [ -z "$CDB" ]; then
+            echo "No compile_commands.json found; macropruner smoke skipped"
+            echo "::warning::Generate compile_commands.json (e.g. with bear) and commit it, or set MACROPRUNER_CDB"
+            exit 0
+          fi
+          echo "CDB=$CDB" >> "$GITHUB_OUTPUT"
+          echo "Using compile_db: $CDB"
+
+      - name: Run macropruner smoke
+        env:
+          MACROPRUNER_READONLY: "1"  # don't accidentally let the LLM write anything
+        run: |
+          set -e
+          . .venv/bin/activate
+          FILE="${{ steps.find-file.outputs.FILE }}"
+          CDB="${{ steps.find-cdb.outputs.CDB }}"
+
+          echo "===== read_c (regex backend, no target) ====="
+          .venv/bin/python cli.py read "$FILE" --cdb "$CDB" | head -20
+
+          echo
+          echo "===== read_c (regex backend, target=PRODUCT_3) ====="
+          .venv/bin/python cli.py read "$FILE" --target PRODUCT_3 --cdb "$CDB" | head -20
+
+          echo
+          echo "===== read_c_skeleton (skeleton view) ====="
+          .venv/bin/python cli.py skeleton "$FILE" --target PRODUCT_3 --cdb "$CDB" | head -20
+
+      - name: Upload smoke log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macropruner-smoke-log
+          path: |
+            /tmp/macropruner-smoke.log
+            *.log
+            macropruner-smoke.log
+          if-no-files-found: ignore

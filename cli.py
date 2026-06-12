@@ -16,6 +16,12 @@ Three modes:
 Configuration via .macroprunerrc is honored; the --target / --cdb
 flags override it.
 
+Environment variables:
+  MACROPRUNER_READONLY=1   refuse apply_patch (MCP only; CLI has no
+                            write subcommand so this is a no-op for
+                            the CLI but still useful when the same
+                            shell environment is shared)
+
 Exit codes:
   0  success
   1  fatal error (file not found, malformed diff, etc.)

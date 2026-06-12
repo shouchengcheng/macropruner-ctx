@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -27,6 +28,84 @@ from patch_applier import (
     check_c_syntax as _check_c_syntax,
     PatchError,
 )
+
+
+def _is_readonly_mode() -> bool:
+    """True if the process is running in read-only mode.
+
+    In read-only mode, apply_patch is refused at the MCP tool boundary
+    (so even an LLM that didn't see the env var can't write). The
+    CLI also honours this flag. Set via:
+
+        export MACROPRUNER_READONLY=1
+
+    Useful for: read-only CI smoke tests, audit-only sessions, code
+    review workflows where the LLM should see the pruner but never
+    write anything.
+    """
+    return os.environ.get("MACROPRUNER_READONLY", "").lower() in ("1", "true", "yes", "on")
+
+
+def _check_path_safe(file_path: str, allowlist, denylist) -> Optional[FatalError]:
+    """Validate file_path against the project's allowlist/denylist.
+
+    Returns None if the path is safe; a FatalError with a descriptive
+    hint otherwise. Used by read_c / read_c_skeleton / read_c_with_deps
+    / apply_patch to refuse paths outside the project root.
+
+    An empty allowlist means "no restriction" (the legacy
+    behaviour, kept for backwards compatibility). An empty
+    denylist means "deny nothing".
+    """
+    if not allowlist and not denylist:
+        return None  # no restrictions configured
+
+    # Resolve to an absolute path; this also collapses `..` etc.
+    try:
+        resolved = os.path.realpath(file_path)
+    except (TypeError, ValueError):
+        return FatalError(
+            f"Invalid file_path: {file_path!r}",
+            hint="file_path must be a string",
+        )
+
+    # Denylist: check if the resolved path is inside any denylisted
+    # directory. We use os.path.commonpath for the "is-inside"
+    # check (handles trailing slashes correctly).
+    for denied in denylist:
+        denied_abs = os.path.realpath(denied)
+        try:
+            common = os.path.commonpath([resolved, denied_abs])
+        except ValueError:
+            continue  # different drives on Windows
+        if common == denied_abs:
+            return FatalError(
+                f"file_path is under a denylisted root: {file_path!r} "
+                f"(matches {denied!r})",
+                hint="remove the path from pruner.path_denylist in .macroprunerrc "
+                     "if the user actually wants to touch it",
+            )
+
+    # Allowlist: if non-empty, the path must be under at least one
+    # allowed root. If allowlist is empty, all paths are allowed
+    # (subject to the denylist check above).
+    if not allowlist:
+        return None
+
+    for allowed in allowlist:
+        allowed_abs = os.path.realpath(allowed)
+        try:
+            common = os.path.commonpath([resolved, allowed_abs])
+        except ValueError:
+            continue
+        if common == allowed_abs:
+            return None
+
+    return FatalError(
+        f"file_path is not under any allowlisted root: {file_path!r}",
+        hint="add the path's parent directory to pruner.path_allowlist in "
+             ".macroprunerrc, or remove the allowlist to allow all paths",
+    )
 
 
 server = FastMCP(
@@ -113,6 +192,13 @@ def _prune_file(
             sysroot = cfg.get("pruner.sysroot", "") or ""
         if not extra_target:
             extra_target = cfg.get("pruner.extra_target", "") or ""
+        # Path safety check (P12-1). Refuse the call if file_path
+        # is outside the allowlist or inside the denylist.
+        allowlist = cfg.get("pruner.path_allowlist", []) or []
+        denylist = cfg.get("pruner.path_denylist", []) or []
+        path_err = _check_path_safe(file_path, allowlist, denylist)
+        if path_err is not None:
+            raise path_err
 
     resolved_path = _resolve_file_path(file_path)
     if not resolved_path:
@@ -245,15 +331,27 @@ def read_c(
         Pruned source code with a summary header showing what was removed.
     """
     try:
+        t0 = time.monotonic_ns()
         result = _prune_file(
             file_path, target, compile_db=compile_db, mode=mode, backend=backend,
             token_budget=token_budget, sysroot=sysroot, extra_target=extra_target,
         )
+        # Stage 4 / skeletonization happen inside _prune_file; we measure
+        # the whole call here so the user sees one consistent number.
+        elapsed_ms = (time.monotonic_ns() - t0) / 1e6
 
         # Build the summary header. The clang backend already prepends
         # its own banner (it knows its output is fully preprocessed).
         if result.backend_name == "clang":
-            return result.code
+            # Inject the latency into the clang banner so the user still
+            # sees a single timing signal even though we don't add our own
+            # banner for the clang oracle.
+            return result.code.replace(
+                "/* --- MacroPruner-Ctx (Clang Backend / Oracle) --- */",
+                f"/* --- MacroPruner-Ctx (Clang Backend / Oracle) ---\n"
+                f"/* Time:      {elapsed_ms:>6.1f} ms                              */",
+                1,
+            )
 
         tok = result.token_estimate
 
@@ -281,6 +379,7 @@ def read_c(
             f"({tok['saved_pct']}%)                  */\n"
             f"/* Mode:      {mode}                                */\n"
             f"/* Backend:   {result.backend_name}                              */\n"
+            f"/* Time:      {elapsed_ms:>6.1f} ms                              */\n"
             + (budget_line if budget_line else "")
             + f"/* ------------------------------------------------ */\n\n"
         )
@@ -389,6 +488,26 @@ def apply_patch(file_path: str, diff: str) -> str:
     Returns:
         Success message or [FATAL]/[WARN]-tagged error details.
     """
+    # Read-only mode: refuse all writes. This is a hard block at the
+    # MCP tool boundary — the LLM cannot bypass it by failing to
+    # notice the env var. Use for audit-only sessions, CI smoke
+    # tests, or any context where you want the LLM to see the pruner
+    # but not modify anything.
+    if _is_readonly_mode():
+        return FatalError(
+            "apply_patch refused: MACROPRUNER_READONLY=1 is set",
+            hint="unset the env var to allow writes, or use read_c instead",
+        ).formatted()
+
+    # Path safety check (P12-1). Refuse if file_path is outside
+    # the project's allowlist or inside a denylisted root.
+    cfg = load_config()
+    allowlist = cfg.get("pruner.path_allowlist", []) or []
+    denylist = cfg.get("pruner.path_denylist", []) or []
+    path_err = _check_path_safe(file_path, allowlist, denylist)
+    if path_err is not None:
+        return path_err.formatted()
+
     resolved = _resolve_file_path(file_path)
     if not resolved:
         return FatalError(

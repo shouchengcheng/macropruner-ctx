@@ -1,0 +1,141 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch on new pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Unit + integration tests across Python versions ───────────
+  test:
+    name: "Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't cancel siblings if one fails; we want to see all results.
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('requirements*.txt', 'pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+      - name: Create venv and install
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install mcp
+          # Install the package itself in editable mode so we test
+          # the actual imports, not the loose .py files in cwd.
+          pip install -e .
+
+      - name: Run all 15 test suites
+        shell: bash
+        run: |
+          set +e
+          pass=0
+          fail=0
+          for t in test_pruner test_pruner_realistic test_expr_eval \
+                   test_skeletonizer test_dep_graph test_conditional_dep_graph \
+                   test_cc_parser_cache test_config test_errors test_token_budget \
+                   test_clang_sysroot test_patch_applier test_cli test_backends \
+                   test_mcp_server; do
+            .venv/bin/python "$t.py" > /tmp/test_out.log 2>&1
+            rc=$?
+            if [ $rc -eq 0 ]; then
+              echo "  $t: PASS"
+              pass=$((pass+1))
+            else
+              echo "  $t: FAIL (rc=$rc)"
+              cat /tmp/test_out.log
+              fail=$((fail+1))
+            fi
+          done
+          echo
+          echo "Suites: $pass passed, $fail failed"
+          if [ $fail -gt 0 ]; then
+            exit 1
+          fi
+
+  # ── Real SDK smoke test (optional, only on main + manual) ────
+  # The ws63 SDK is not in the repo (it's a 200+ MB external
+  # checkout). This job only runs when the WS63_SDK_PATH secret is
+  # set in the repo settings, so it's a no-op for forks.
+  smoke-test-ws63:
+    name: "ws63 SDK smoke (opt-in)"
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get install -y clang
+
+      - name: Check for ws63 SDK
+        env:
+          WS63_SDK_PATH: ${{ secrets.WS63_SDK_PATH }}
+        run: |
+          if [ -z "$WS63_SDK_PATH" ]; then
+            echo "WS63_SDK_PATH secret not set; skipping smoke test"
+            exit 0
+          fi
+          if [ ! -d "$WS63_SDK_PATH" ]; then
+            echo "WS63 SDK not found at $WS63_SDK_PATH; skipping"
+            exit 0
+          fi
+          echo "Running smoke test against $WS63_SDK_PATH"
+          .venv/bin/python integration/ws63_smoke.py
+
+  # ── Lint (lightweight; no flake8/pylint to keep deps minimal) ─
+  lint:
+    name: "syntax check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile-check all .py files
+        run: |
+          python -m compileall -q . || exit 1
+      - name: AST-check all .py files
+        run: |
+          python -c "
+          import ast, os, sys
+          ok = True
+          for root, dirs, files in os.walk('.'):
+              if '.venv' in dirs:
+                  dirs.remove('.venv')
+              for f in files:
+                  if f.endswith('.py'):
+                      p = os.path.join(root, f)
+                      try:
+                          with open(p) as fh:
+                              ast.parse(fh.read())
+                      except SyntaxError as e:
+                          print(f'SYNTAX ERROR in {p}: {e}')
+                          ok = False
+          sys.exit(0 if ok else 1)
+          "

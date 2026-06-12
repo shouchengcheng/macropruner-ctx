@@ -1,0 +1,10 @@
+include README.md
+include LICENSE
+include INTEGRATION.md
+include PLAN.md
+include SETUP.md
+include docs/*.md
+include docs/prompts/*.md
+include demo/demo.sh
+include integration/ws63_smoke.py
+include .github/workflows/*.yml

@@ -6,3 +6,6 @@ compile_commands.json
 *.pyo
 .cache/
 .zhiyu/
+dist/
+build/
+*.egg-info/
