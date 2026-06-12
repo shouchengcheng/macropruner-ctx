@@ -16,12 +16,14 @@ MacroPruner-Ctx 是一个 MCP（Model Context Protocol）服务器，让 LLM Age
 - 跨编译 SDK 支持（clang backend 加 `--sysroot` 跑 HiSilicon ws63、aarch64 等）
 - 错误分级（`[FATAL]` / `[ERROR]` / `[WARN]`）
 - 不依赖 git 的 apply_patch
+- **`bootstrap_config` — LLM 自动生成 .macroprunerrc**（init-project 集成）
 
-**4 个 MCP 工具**：
+**5 个 MCP 工具**：
 - `read_c` — 读单文件，剪 inactive 块
 - `read_c_skeleton` — 剪 + 骨架化（剥函数体）
 - `read_c_with_deps` — 多文件上下文（含条件 include 感知）
 - `apply_patch` — 用 unified diff 写回原文件
+- `bootstrap_config` — 自动生成 `.macroprunerrc`（init-project 集成；只在无配置时出现）
 
 ---
 
@@ -61,9 +63,84 @@ pip install mcp
 
 ---
 
-## 第二步：（推荐）写项目配置
+## 第二步：自动配置（init-project 集成）
 
-在你**项目根**（不是 macropruner-ctx 目录）创建 `.macroprunerrc`：
+如果你用 [init-project skill](https://github.com/) 管理项目（即项目根有 `PROJECT_MANIFEST.md`），`macropruner-ctx` 会在 MCP 启动时**自动检测**已有配置。
+
+如果检测不到 `.macroprunerrc`，**5 个工具列表里会自动多一个 `bootstrap_config`**。LLM agent 第一次集成时会看到它。
+
+### 典型工作流（LLM 自治）
+
+```
+User: 打开这个项目，帮我看看 uart.c 里 PRODUCT_3 的代码路径
+LLM:  让我先看下有什么工具...
+LLM:  哦，有个 bootstrap_config。先调一下看推荐什么。
+LLM:  bootstrap_config()
+      → 看到推荐：
+        default_target = PRODUCT_3
+        compile_db = ai/projects/ws63-app/compile_commands/cdb.json
+        path_allowlist = [<project-root>]
+      → 自动写：
+        bootstrap_config(apply=True)
+        → [OK] .macroprunerrc written
+LLM:  read_c(file_path="src/uart.c")
+      → 剪好的代码（target 自动取自 .macroprunerrc）
+```
+
+整个过程**用户没写一行配置**。
+
+### bootstrap_config 怎么工作
+
+**扫描优先级**（首个命中即用）：
+
+1. **PROJECT_MANIFEST.md**（init-project 产物）
+   - 解析 `active_project` 字段
+   - 从 Project Matrix 拿当前项目的 `compile_commands` 路径
+   - `target` 自动从 cdb 启发式推断
+2. **compile_commands.json** 标准位置
+   - `<project>/ai/projects/<project_id>/compile_commands/*.json`（init-project 标准）
+   - `<project>/build/compile_commands.json`
+   - `<project>/compile_commands.json`
+   - 全项目 glob
+3. **target 启发式**（从 cdb 的 `-D` 标志）：
+   - `-DPRODUCT_TYPE=3` → `target=PRODUCT_3`（最常见）
+   - `-DCHIP=WS63` → `target=CHIP_WS63`
+   - 无 naming macro → `target=DEFAULT`
+
+**写到哪**：`<project>/ai/projects/<active_project>/.macroprunerrc`
+（init-project 标准的"项目级隔离"位置）
+
+**安全**：
+- 默认不覆盖现有文件（需 `force=True`）
+- 生成的配置默认设 `path_allowlist = [<project_root>]`，**默认安全**
+- LLM 显式 `apply=True` 才会写文件
+
+### 何时不用 bootstrap_config
+
+- **手写优先**的团队：直接写 `.macroprunerrc`，工具列表里就**不会出现** `bootstrap_config`
+- **没有 PROJECT_MANIFEST.md** 的小项目：`bootstrap_config` 仍能工作（启发式扫描）
+- **CI 自动化**：bootstrap 一次后 commit `.macroprunerrc` 到仓库，CI 读
+
+### 切换项目时
+
+如果项目有多个 product variant：
+
+```ini
+# .macroprunerrc 切 target
+default_target = PRODUCT_5    # 改这一行即可
+```
+
+或运行时：
+
+```
+read_c(file_path="src/uart.c", target="PRODUCT_5")  # 覆盖 rc 的默认值
+```
+
+---
+
+## 第二步（手动）：手写项目配置
+
+如果你想完全手写，**项目根**（不是 macropruner-ctx 目录）创建 `.macroprunerrc`：
 
 ```ini
 # /path/to/your-firmware/.macroprunerrc

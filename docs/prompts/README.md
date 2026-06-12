@@ -14,6 +14,7 @@ your framework allows.
 | [03-token-budget.md](03-token-budget.md) | Hard per-call token budget; large files | ~250 |
 | [04-oracle.md](04-oracle.md) | User questions the regex output; needs ground truth | ~300 |
 | [05-safety.md](05-safety.md) | `MACROPRUNER_READONLY=1` is set; LLM must not write | ~400 |
+| [06-bootstrap-onboarding.md](06-bootstrap-onboarding.md) | First-time setup via `bootstrap_config`; project may not have `.macroprunerrc` | ~600 |
 
 ## Composing prompts
 

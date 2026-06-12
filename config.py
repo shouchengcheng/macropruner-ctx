@@ -53,8 +53,100 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 
+def _find_initproject_active_rc(project_root: Path) -> Optional[Path]:
+    """Find the active project's .macroprunerrc under an init-project layout.
+
+    init-project's spec (v2.4) places project-level assets in
+    `ai/projects/<project_id>/.macroprunerrc`. To find it, we
+    look for PROJECT_MANIFEST.md in `project_root` or any of its
+    ancestors, parse out the active project, and check the
+    expected path.
+
+    Returns the path if it exists, else None. Does NOT call the
+    manifest parser's full machinery — this is a fast path used
+    on every config load.
+    """
+    # Walk up to find PROJECT_MANIFEST.md.
+    cur = project_root.resolve()
+    for _ in range(10):
+        manifest = cur / "PROJECT_MANIFEST.md"
+        if manifest.is_file():
+            break
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+    else:
+        return None
+
+    # Quick parse: find `active_project:` line and `### <name>` blocks
+    # with `project_id:` and `active: true`.
+    try:
+        text = manifest.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    lines = text.splitlines()
+    active_name = ""
+    for ln in lines:
+        if ln.startswith("active_project:"):
+            active_name = ln.split(":", 1)[1].strip()
+            break
+
+    # Walk projects.
+    current: Dict[str, str] = {}
+    found_active = False
+    for ln in lines:
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        # Skip pure comment lines (but not ## / ### section headers).
+        if stripped.startswith("#") and not stripped.startswith("##"):
+            continue
+        if ln.startswith("### "):
+            if current and (current.get("name") == active_name or
+                            current.get("active", "").lower() in
+                            ("true", "yes", "1", "on")):
+                if found_active:
+                    break
+                # Resolve the rc path.
+                pid = current.get("project_id", "default")
+                candidate = manifest.parent / "ai" / "projects" / pid / ".macroprunerrc"
+                if candidate.is_file():
+                    return candidate
+                found_active = True
+            current = {"name": ln[4:].strip()}
+        elif ln.startswith("- ") and ":" in ln and current is not None:
+            k, _, v = ln[2:].partition(":")
+            current[k.strip()] = v.strip()
+
+    # Trailing project (no ### terminator).
+    if current and (current.get("name") == active_name or
+                    current.get("active", "").lower() in ("true", "yes", "1", "on")):
+        pid = current.get("project_id", "default")
+        candidate = manifest.parent / "ai" / "projects" / pid / ".macroprunerrc"
+        if candidate.is_file():
+            return candidate
+
+    return None
+
+
 def _find_config(project_root: Optional[str] = None) -> Optional[Path]:
-    """Locate the first existing .macroprunerrc."""
+    """Locate the first existing .macroprunerrc.
+
+    Search order:
+      1. $MACROPRUNER_CONFIG env var (absolute path)
+      2. <project_root>/.macroprunerrc  (project-level)
+      3. <project_root>/ai/projects/<active_project>/.macroprunerrc
+         (init-project project-level; P14-2)
+      4. <project_root>/macroprunerrc  (without leading dot)
+      5. <cwd>/.macroprunerrc
+      6. <cwd>/ai/projects/<active_project>/.macroprunerrc
+      7. <home>/.macroprunerrc
+
+    The init-project lookup is a fast path — only consulted if
+    no per-directory .macroprunerrc was found, and only against
+    ancestors of project_root.
+    """
     env = os.environ.get("MACROPRUNER_CONFIG")
     if env:
         p = Path(env)
@@ -64,12 +156,25 @@ def _find_config(project_root: Optional[str] = None) -> Optional[Path]:
     if project_root:
         roots.append(Path(project_root))
     roots.append(Path.cwd())
-    roots.append(Path.home())
+    # Per-directory rc (the classic location)
     for root in roots:
         for name in (".macroprunerrc", "macroprunerrc"):
             candidate = root / name
             if candidate.is_file():
                 return candidate
+    # init-project project-level rc (P14-2). The active project
+    # is read from PROJECT_MANIFEST.md; the rc is at
+    # ai/projects/<project_id>/.macroprunerrc relative to the
+    # manifest's parent (which we treat as repo_root).
+    for root in roots:
+        rc = _find_initproject_active_rc(root)
+        if rc is not None:
+            return rc
+    # Last resort: home directory.
+    for name in (".macroprunerrc", "macroprunerrc"):
+        candidate = Path.home() / name
+        if candidate.is_file():
+            return candidate
     return None
 
 

@@ -28,6 +28,13 @@ from patch_applier import (
     check_c_syntax as _check_c_syntax,
     PatchError,
 )
+from bootstrap import scan as _bootstrap_scan, apply as _bootstrap_apply
+
+
+def _has_macroprunerrc() -> bool:
+    """Quick check: does the config system find a .macroprunerrc?"""
+    cfg = load_config()
+    return bool(cfg.get("_config_path"))
 
 
 def _is_readonly_mode() -> bool:
@@ -44,6 +51,76 @@ def _is_readonly_mode() -> bool:
     write anything.
     """
     return os.environ.get("MACROPRUNER_READONLY", "").lower() in ("1", "true", "yes", "on")
+
+
+# Default cap for read_c output (P15-1). 50 KB is large enough
+# for most real C files, small enough that the LLM doesn't choke.
+# Override with `max_bytes=` per call.
+DEFAULT_MAX_BYTES = 50_000
+
+
+def _apply_truncation(
+    text: str,
+    offset: int = 0,
+    max_bytes: int = 0,
+) -> str:
+    """Truncate the output to <= max_bytes characters, optionally
+    starting at `offset` bytes into `text`.
+
+    This is the last line of defense against the LLM receiving
+    an output so large that the LLM provider truncates the
+    response (the "Response truncated due to output length limit"
+    error). The cap applies to character count (which approximates
+    bytes for ASCII C code).
+
+    If truncation occurs, a [WARN] banner is appended that tells
+    the LLM how to ask for more (offset=N).
+
+    Args:
+        text: The full output (banner + pruned code).
+        offset: Byte offset to start at. 0 = start of text.
+        max_bytes: Hard cap. 0 means use DEFAULT_MAX_BYTES.
+
+    Returns:
+        Possibly-truncated text. If truncated, the returned text
+        ends with a [WARN] banner. If `offset >= len(text)`, the
+        banner reports the overflow without further truncation.
+    """
+    if max_bytes <= 0:
+        max_bytes = DEFAULT_MAX_BYTES
+
+    if offset < 0:
+        offset = 0
+    if offset >= len(text):
+        # Caller asked for an offset past the end. Return a banner
+        # only; the LLM can adjust.
+        return (
+            f"/* [WARN] Truncated: offset {offset} >= total size "
+            f"{len(text)} bytes. The file may have been pruned "
+            f"smaller than expected. Try offset=0 to start over. */"
+        )
+
+    # If text is small enough, return as-is.
+    if len(text) - offset <= max_bytes:
+        return text
+
+    # Truncate to the cap. Try to break on a line boundary for
+    # readability (so the LLM doesn't see a half-line).
+    end = offset + max_bytes
+    if end < len(text):
+        # Find the last newline <= end.
+        nl = text.rfind("\n", offset, end)
+        if nl > offset + max_bytes // 2:
+            end = nl  # break on the newline, not deep into the cap
+
+    truncated = text[:end]
+    remaining = len(text) - end
+    return (
+        truncated
+        + f"\n/* [WARN] Truncated: showing bytes {offset}-{end} of "
+        f"{len(text)} total. {remaining} bytes remaining. */\n"
+        + f"/* To continue, call read_c(file_path=..., offset={end}). */\n"
+    )
 
 
 def _check_path_safe(file_path: str, allowlist, denylist) -> Optional[FatalError]:
@@ -300,7 +377,9 @@ def _enforce_budget(
     "- backend (optional): 'regex' (default, fast pure-Python) | 'clang' (slower, ground truth via clang -E) | 'auto' (prefers clang if available, falls back to regex)\n"
     "- token_budget (optional): Maximum LLM tokens for the output. 0 = no cap (default). If exceeded, output auto-degrades to skeleton (function bodies stripped). Result tagged with [WARN] if even the skeleton exceeds the cap.\n"
     "- sysroot (optional): Clang-backend only. Path to a cross-compile SDK's sysroot (e.g. /opt/ws63/tools/sysroot). If omitted, auto-detected from the compile_db entry's --sysroot= flag. Falls back to clang's default sysroot for native builds.\n"
-    "- extra_target (optional): Clang-backend only. --target= value to pass to clang (e.g. 'riscv32-linux-musl'). Auto-detected from the compile_db entry if not given.\n",
+    "- extra_target (optional): Clang-backend only. --target= value to pass to clang (e.g. 'riscv32-linux-musl'). Auto-detected from the compile_db entry if not given.\n"
+    "- offset (optional): Byte offset for paginating large outputs. 0 = start. Use this with the [WARN] Truncated banner to read more of the file.\n"
+    "- max_bytes (optional): Maximum bytes to return. 0 = use the system default (~50KB). When the output exceeds this cap, the call returns the first max_bytes and adds a [WARN] Truncated banner. Set higher if you know the file is large; lower to fit a tight token budget.\n",
 )
 def read_c(
     file_path: str,
@@ -311,6 +390,8 @@ def read_c(
     token_budget: int = 0,
     sysroot: str = "",
     extra_target: str = "",
+    offset: int = 0,
+    max_bytes: int = 0,
 ) -> str:
     """Read and prune a C/C++ source file.
 
@@ -383,12 +464,15 @@ def read_c(
             + (budget_line if budget_line else "")
             + f"/* ------------------------------------------------ */\n\n"
         )
-        return summary + result.code
+        return _apply_truncation(
+            summary + result.code, offset=offset, max_bytes=max_bytes,
+        )
 
     except FileNotFoundError as e:
         return FatalError(
             str(e),
-            hint="verify the path exists, or drop a .macroprunerrc with 'compile_db = ...'",
+            hint="verify the path exists, or call bootstrap_config() to auto-generate "
+                 "the config, or drop a .macroprunerrc with 'compile_db = ...'",
         ).formatted()
     except ValueError as e:
         return FatalError(str(e), hint="check argument types").formatted()
@@ -760,6 +844,136 @@ def read_c_with_deps(
         return f"/* Error: Unclosed conditional directives: {e} */"
     except Exception as e:
         return f"/* Error: {type(e).__name__}: {e} */"
+
+
+# ── Tool: bootstrap_config — P14: auto-generate .macroprunerrc ─
+
+
+@server.tool(
+    name="bootstrap_config",
+    description="Auto-generate .macroprunerrc for the current project. "
+    "Scans PROJECT_MANIFEST.md (init-project skill artifact) or "
+    "compile_commands.json to infer the default target, compile_db, "
+    "and path allowlist. Dry-run by default; call with apply=True to "
+    "write the file.\n\n"
+    "**When to use:** First-time setup of macropruner in a project. "
+    "The tool only appears in the tool list when no .macroprunerrc is "
+    "detected (so you won't accidentally overwrite an existing config).\n\n"
+    "**How to use:**\n"
+    "  1. Call bootstrap_config() (dry-run) — read the recommendation\n"
+    "  2. Call bootstrap_config(apply=True) — write the file\n"
+    "  3. Review the generated .macroprunerrc\n"
+    "  4. Use read_c as normal — it will pick up the config automatically",
+)
+def bootstrap_config(
+    apply: bool = False,
+    force: bool = False,
+    project_root: str = "",
+) -> str:
+    """Auto-generate or preview .macroprunerrc for the current project.
+
+    Args:
+        apply: If True, write the generated config to disk. Default
+               is dry-run (preview only).
+        force: If True, overwrite an existing .macroprunerrc (if any).
+               Default is to refuse if a config already exists.
+        project_root: Absolute path to the project root. Default: CWD.
+
+    Returns:
+        Dry-run: The recommended .macroprunerrc content as a code block.
+        Apply:   A confirmation message with the path written.
+
+    The tool's presence in the tool list is conditional: it only
+    appears when no .macroprunerrc is found by the config system.
+    """
+    try:
+        root = project_root or os.getcwd()
+        result = _bootstrap_scan(project_root=root)
+
+        if result["target"] == "DEFAULT" and result["compile_db"] is None:
+            return (
+                "# [WARN] bootstrap_config could not find a "
+                "compile_commands.json.\n"
+                "# Consider running the build first to generate one, then "
+                "re-run bootstrap_config.\n"
+                f"#\n"
+                f"# rc_path: {result['rc_path']}\n"
+                f"# source:  {result['source']}\n"
+            )
+
+        if not apply:
+            # Dry-run: render the recommendation.
+            lines = [
+                f"# macropruner-ctx bootstrap (dry-run)",
+                f"# source:  {result['source']}",
+                f"# target:  {result['target']}",
+                f"# cdb:     {result['compile_db'] or '(not found)'}",
+                f"# rc_path: {result['rc_path']}",
+                f"",
+            ]
+            if result["rc_already_exists"]:
+                lines.append(
+                    "# NOTE: .macroprunerrc already exists at rc_path. "
+                    "Call with apply=True, force=True to overwrite."
+                )
+            lines.append("")
+            lines.append("Recommended .macroprunerrc:")
+            lines.append("=" * 30)
+            # Import _format_rc
+            from bootstrap import _format_rc
+            comments = {
+                "pruner.default_target":
+                    "Target product/macro (e.g. PRODUCT_3, ws63).",
+                "pruner.compile_db":
+                    "Path to compile_commands.json (relative to project root).",
+                "pruner.default_backend":
+                    "Backend: 'regex' (default), 'clang' (oracle), or 'auto'.",
+                "pruner.default_mode":
+                    "Pruning mode: 'physical' or 'virtual'.",
+                "pruner.default_max_depth":
+                    "include tree depth (1-5) for read_c_with_deps.",
+                "pruner.token_budget":
+                    "Per-call token cap. 0 = unlimited.",
+                "pruner.path_allowlist":
+                    "Paths the pruner may read/write. Empty = no restriction.",
+                "pruner.path_denylist":
+                    "Paths always blocked (subtree match).",
+            }
+            rc_text = _format_rc(result["recommended"], comments)
+            lines.append(rc_text.rstrip())
+            lines.append("")
+            lines.append("To write this config, call:")
+            lines.append("  bootstrap_config(apply=True)")
+            return "\n".join(lines)
+
+        # Apply: write the file.
+        write_result = _bootstrap_apply(project_root=root, force=force)
+        if not write_result["written"]:
+            reason = write_result.get("refused_reason", "unknown")
+            return (
+                f"[WARN] bootstrap_config refused: {reason}\n\n"
+                f"  To overwrite the existing config, call:\n"
+                f"    bootstrap_config(apply=True, force=True)"
+            )
+
+        return (
+            f"[OK] .macroprunerrc written to:\n"
+            f"  {write_result['rc_path']}\n"
+            f"\n"
+            f"Settings:\n"
+            f"  target      = {write_result['target']}\n"
+            f"  compile_db  = {write_result['recommended'].get('pruner.compile_db', '?')}\n"
+            f"  source      = {write_result['source']}\n"
+            f"\n"
+            f"Recommended next steps:\n"
+            f"  1. Review the file at {write_result['rc_path']}\n"
+            f"  2. Add it to git: git add {write_result['rc_path']}\n"
+            f"  3. Try: read_c(file_path='src/main.c') — it should "
+            f"work now without passing target/compile_db.\n"
+        )
+
+    except Exception as e:
+        return format_error(e)
 
 
 # ── Resource: file:// for C/C++ source files ─────────────────
