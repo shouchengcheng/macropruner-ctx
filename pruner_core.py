@@ -77,15 +77,19 @@ class PrunerCore:
 
         Backward-compat note: this method returns bool, but the internal
         parser uses 1/0 for bare identifiers. A 0 evaluates to False here.
+
+        Failure modes (all fall back to False, treating the block as inactive):
+          - ValueError: parser rejection (unbalanced parens, unsupported construct)
+          - IndexError: parser walked past end of token stream (e.g. truncated
+            condition from a `\` line-continuation we didn't preprocess). This
+            used to bubble all the way out of `prune()` and crash the whole
+            call, leaving every subsequent line un-pruned. Catching it here
+            matches the historical "best-effort, never crash" contract.
         """
         try:
             result = self._evaluator.evaluate(condition)
             return bool(result)
-        except ValueError:
-            # On parse failure (unbalanced parens, unsupported construct),
-            # fall back to False — i.e. treat the block as inactive. This
-            # matches the historical behavior and avoids crashing the
-            # whole prune when one weird expression is encountered.
+        except (ValueError, IndexError):
             return False
 
     def is_currently_active(self) -> bool:

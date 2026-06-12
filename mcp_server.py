@@ -469,11 +469,29 @@ def read_c(
         )
 
     except FileNotFoundError as e:
-        return FatalError(
-            str(e),
-            hint="verify the path exists, or call bootstrap_config() to auto-generate "
-                 "the config, or drop a .macroprunerrc with 'compile_db = ...'",
-        ).formatted()
+        msg = str(e)
+        # Distinguish "file not found" (caller's path is wrong) from
+        # "compile_db not found" / "config not generated" so the LLM gets
+        # a useful hint instead of the catch-all "call bootstrap_config()".
+        if "compile_db" in msg or "compile_commands.json" in msg:
+            hint = (
+                "compile_db is missing or unreadable — pass a valid absolute "
+                "path to compile_commands.json, or call bootstrap_config() to "
+                "auto-generate a .macroprunerrc pointing at one"
+            )
+        elif "Cannot resolve file path" in msg:
+            hint = (
+                "the source file does not exist at that path — check spelling, "
+                "case, and that the file is on disk (the agent's path may be "
+                "stale if files were moved or compiled into a different tree)"
+            )
+        else:
+            hint = (
+                "verify the path exists, or call bootstrap_config() to "
+                "auto-generate the config, or drop a .macroprunerrc with "
+                "'compile_db = ...'"
+            )
+        return FatalError(msg, hint=hint).formatted()
     except ValueError as e:
         return FatalError(str(e), hint="check argument types").formatted()
     except Exception as e:

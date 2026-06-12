@@ -291,6 +291,8 @@ class _Parser:
 
     # unary_atom := number | defined_call | identifier | macro_call
     def _parse_unary_atom(self):
+        if self.pos >= len(self.tokens):
+            raise ValueError("unexpected end of expression")
         kind, val = self.tokens[self.pos]
 
         if kind == "NUM":
